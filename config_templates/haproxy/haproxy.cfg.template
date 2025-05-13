@@ -1,6 +1,6 @@
 # ======================================================================
 # HAProxy Configuration Template
-# Version 1.1 (Fixes for forwardfor and httpchk, UDP bind)
+# Version 1.3 (Fixes named defaults, Correct UDP handling for Hysteria2)
 # ======================================================================
 
 global
@@ -24,8 +24,8 @@ defaults
     # option  forwardfor # REMOVED from global, will be added to HTTP sections
     option  http-server-close
     timeout connect 5s
-    timeout client  30s
-    timeout server  30s
+    timeout client  30s  # For UDP, this is more of an inactivity timeout for the flow tracking
+    timeout server  30s  # For UDP, this is more of an inactivity timeout for the flow tracking
     retries 3
     option  redispatch
 
@@ -37,11 +37,8 @@ defaults DEFAULTS_HTTP
 # ----------------------------------------------------------------------
 # Frontend: Subscription Website (Port ${SUBSCRIPTION_SITE_PORT}, Obscured)
 # ----------------------------------------------------------------------
-frontend ft_subscription_site
-    # Use HTTP specific defaults
-    defaults DEFAULTS_HTTP
+frontend ft_subscription_site from DEFAULTS_HTTP
     bind *:${SUBSCRIPTION_SITE_PORT} ssl crt ${HAPROXY_CERT_DIR}/${SUBSCRIPTION_DOMAIN}.pem alpn h2,http/1.1
-    # mode http (inherited from DEFAULTS_HTTP)
     option tcplog
 
     acl is_sub_page             path ${SUBSCRIPTION_BASE64_PATH}
@@ -54,10 +51,7 @@ frontend ft_subscription_site
 # ----------------------------------------------------------------------
 # Backend: Subscription App (Flask/Gunicorn)
 # ----------------------------------------------------------------------
-backend bk_subscription_app
-    # Use HTTP specific defaults
-    defaults DEFAULTS_HTTP
-    # mode http (inherited from DEFAULTS_HTTP)
+backend bk_subscription_app from DEFAULTS_HTTP
     option httpchk GET /health HTTP/1.1\\r\\nHost:\ ${SUBSCRIPTION_DOMAIN}
     default-server check fall 3 rise 2 inter 5s
     server sub_app_server 127.0.0.1:${SUBSCRIPTION_APP_LISTEN_PORT}
@@ -65,11 +59,8 @@ backend bk_subscription_app
 # ----------------------------------------------------------------------
 # Frontend: VLESS (Port ${VLESS_HTTPUPGRADE_PORT}, Obscured Path)
 # ----------------------------------------------------------------------
-frontend ft_vless_tls
-    # Use HTTP specific defaults
-    defaults DEFAULTS_HTTP
+frontend ft_vless_tls from DEFAULTS_HTTP
     bind *:${VLESS_HTTPUPGRADE_PORT} ssl crt ${HAPROXY_CERT_DIR}/${MAIN_DOMAIN}.pem alpn h2,http/1.1
-    # mode http (inherited from DEFAULTS_HTTP)
     option tcplog
 
     acl is_vless_path path ${VLESS_PATH}
@@ -79,24 +70,26 @@ frontend ft_vless_tls
 # ----------------------------------------------------------------------
 # Backend: VLESS (Sing-Box)
 # ----------------------------------------------------------------------
-backend bk_vless
-    # Use HTTP specific defaults
-    defaults DEFAULTS_HTTP
-    # mode http (inherited from DEFAULTS_HTTP)
+backend bk_vless from DEFAULTS_HTTP
     server vless_server 127.0.0.1:${SINGBOX_VLESS_LISTEN_PORT}
 
 # ----------------------------------------------------------------------
 # Frontend: Hysteria2 (Port ${HYSTERIA2_PORT}, UDP Rate Limit)
 # ----------------------------------------------------------------------
 frontend ft_hysteria2
-    # DOES NOT use DEFAULTS_HTTP
-    bind *:${HYSTERIA2_PORT}
-    mode tcp
-    option tcplog # tcplog is fine for mode tcp
+    # Listen for UDP traffic on the specified port
+    bind *:${HYSTERIA2_PORT} proto udp
+    mode tcp # In HAProxy, 'mode tcp' is used for L4 UDP proxying when 'proto udp' is specified
+    option tcplog
     log global
 
+    # Stick-table for rate limiting based on source IP
+    # Stores the rate of "connections" (UDP flows from a source IP) over 10 seconds
     stick-table type ip size 1m expire 30s store conn_rate(10s)
     tcp-request connection track-sc0 src
+
+    # Reject (drop) further UDP datagrams from IPs exceeding 10 "connections" (flows) per 10s
+    # For UDP, "reject" effectively means HAProxy stops forwarding datagrams from this source.
     tcp-request connection reject if { sc0_conn_rate gt 10 }
 
     default_backend bk_hysteria2
@@ -105,9 +98,9 @@ frontend ft_hysteria2
 # Backend: Hysteria2 (Sing-Box)
 # ----------------------------------------------------------------------
 backend bk_hysteria2
-    # DOES NOT use DEFAULTS_HTTP
-    mode tcp
-    server hysteria2_server 127.0.0.1:${SINGBOX_HYSTERIA2_LISTEN_PORT}
+    mode tcp # Consistent with frontend for L4 UDP proxying
+    # Forward UDP datagrams to the Sing-box Hysteria2 listener
+    server hysteria2_server 127.0.0.1:${SINGBOX_HYSTERIA2_LISTEN_PORT} proto udp
 # ======================================================================
 # End of HAProxy Configuration Template
 # ======================================================================
