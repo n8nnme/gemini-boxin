@@ -1,0 +1,133 @@
+# ======================================================================
+# Git Ignore File Project
+# ======================================================================
+
+# --- Python ---
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Usually dist/ but potentially elsewhere
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyderworkspace
+
+# VS Code settings
+.vscode/
+
+# --- Shell / Deployment ---
+# Temporary files created by scripts
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Temporary deployment files (if script is run in project root)
+cloudflare.ini
+
+# Log files (if any happen to be generated in the project dir)
+*.log
+
+# --- OS Generated Files ---
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Thumbnails
+._*
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+# Linux
+*~
+
+# --- IDE specific ---
+# IntelliJ / PyCharm
+.idea/
+*.iml
+*.iws
+out/
+
+# --- Other ---
+# Credentials or secrets accidentally committed
+*.key
+*.pem # Usually certs aren't committed, but ignore just in case
+*.token
+
+# Node.js (if used for any tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json # Sometimes ignored, depends on project policy
+yarn.lock
+
+# Terraform (if used for infra)
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Generated image file (if script run in root)
+background.jpg
