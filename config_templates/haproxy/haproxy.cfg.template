@@ -1,6 +1,6 @@
 # ======================================================================
 # HAProxy Configuration Template
-# Version 1.3 (Fixes named defaults, Correct UDP handling for Hysteria2)
+# Version 1.4 (Removed Hysteria2 UDP proxying due to 'proto udp' issue, fixed defaults ambiguity)
 # ======================================================================
 
 global
@@ -16,30 +16,30 @@ global
     ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
     tune.ssl.default-dh-param 2048
 
-defaults
+# --- Base Defaults (non-HTTP specific) ---
+defaults DEFAULTS_BASE # Named the base defaults
     log     global
-    # mode    http # Keep this global default, can be overridden
-    option  httplog
+    # mode    http # Commented out, mode will be set by DEFAULTS_HTTP or explicitly
+    option  httplog # Can be here, but DEFAULTS_HTTP will also have it. Not harmful.
     option  dontlognull
-    # option  forwardfor # REMOVED from global, will be added to HTTP sections
-    option  http-server-close
+    option  http-server-close # Good for HTTP, less relevant for pure TCP/UDP
     timeout connect 5s
-    timeout client  30s  # For UDP, this is more of an inactivity timeout for the flow tracking
-    timeout server  30s  # For UDP, this is more of an inactivity timeout for the flow tracking
+    timeout client  30s
+    timeout server  30s
     retries 3
     option  redispatch
 
 # --- Defaults for HTTP specific frontends/backends ---
-defaults DEFAULTS_HTTP
+defaults DEFAULTS_HTTP from DEFAULTS_BASE # Inherit from DEFAULTS_BASE
     mode    http
-    option  forwardfor # Apply forwardfor only to HTTP sections using these defaults
+    option  forwardfor
 
 # ----------------------------------------------------------------------
 # Frontend: Subscription Website (Port ${SUBSCRIPTION_SITE_PORT}, Obscured)
 # ----------------------------------------------------------------------
 frontend ft_subscription_site from DEFAULTS_HTTP
     bind *:${SUBSCRIPTION_SITE_PORT} ssl crt ${HAPROXY_CERT_DIR}/${SUBSCRIPTION_DOMAIN}.pem alpn h2,http/1.1
-    option tcplog
+    option tcplog # This is fine to add specific logging
 
     acl is_sub_page             path ${SUBSCRIPTION_BASE64_PATH}
     acl is_api_path             path_beg ${API_BASE64_PATH_PREFIX}/
@@ -74,33 +74,11 @@ backend bk_vless from DEFAULTS_HTTP
     server vless_server 127.0.0.1:${SINGBOX_VLESS_LISTEN_PORT}
 
 # ----------------------------------------------------------------------
-# Frontend: Hysteria2 (Port ${HYSTERIA2_PORT}, UDP Rate Limit)
+# Hysteria2 sections are REMOVED from HAProxy.
+# Sing-box should listen directly on the public HYSTERIA2_PORT (UDP).
+# Firewall (UFW) should allow direct access to Sing-box for Hysteria2.
 # ----------------------------------------------------------------------
-frontend ft_hysteria2
-    # Listen for UDP traffic on the specified port
-    bind *:${HYSTERIA2_PORT} proto udp
-    mode tcp # In HAProxy, 'mode tcp' is used for L4 UDP proxying when 'proto udp' is specified
-    option tcplog
-    log global
 
-    # Stick-table for rate limiting based on source IP
-    # Stores the rate of "connections" (UDP flows from a source IP) over 10 seconds
-    stick-table type ip size 1m expire 30s store conn_rate(10s)
-    tcp-request connection track-sc0 src
-
-    # Reject (drop) further UDP datagrams from IPs exceeding 10 "connections" (flows) per 10s
-    # For UDP, "reject" effectively means HAProxy stops forwarding datagrams from this source.
-    tcp-request connection reject if { sc0_conn_rate gt 10 }
-
-    default_backend bk_hysteria2
-
-# ----------------------------------------------------------------------
-# Backend: Hysteria2 (Sing-Box)
-# ----------------------------------------------------------------------
-backend bk_hysteria2
-    mode tcp # Consistent with frontend for L4 UDP proxying
-    # Forward UDP datagrams to the Sing-box Hysteria2 listener
-    server hysteria2_server 127.0.0.1:${SINGBOX_HYSTERIA2_LISTEN_PORT} proto udp
 # ======================================================================
 # End of HAProxy Configuration Template
 # ======================================================================
