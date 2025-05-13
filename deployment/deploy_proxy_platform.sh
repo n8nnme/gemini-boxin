@@ -262,7 +262,7 @@ install_dependencies() {
     run_cmd_or_exit apt-get install -y \
         haproxy \
         certbot python3-certbot-dns-cloudflare \
-        python3-pip python3-venv python3-full \ # Added python3-full for completeness
+        python3-pip python3-venv python3-full \
         fail2ban \
         jq curl unzip coreutils uuid-runtime \
         rsyslog
