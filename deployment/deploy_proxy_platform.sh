@@ -262,7 +262,7 @@ install_dependencies() {
     run_cmd_or_exit apt-get install -y \
         haproxy \
         certbot python3-certbot-dns-cloudflare \
-        python3-pip python3-venv \
+        python3-pip python3-venv python3-full \ # Added python3-full for completeness
         fail2ban \
         jq curl unzip coreutils uuid-runtime \
         rsyslog
@@ -286,14 +286,9 @@ install_dependencies() {
     run_cmd_or_exit systemctl enable haproxy; run_cmd_or_exit systemctl start haproxy
     run_cmd_or_exit systemctl enable fail2ban; run_cmd_or_exit systemctl start fail2ban
 
-    # REMOVED global pip install for Flask and Gunicorn:
-    # log_info "Installing Python packages globally (Flask, Gunicorn)..."
-    # run_cmd_or_exit python3 -m pip install --upgrade pip # Upgrading global pip is also fine to remove if not strictly needed
-    # run_cmd_or_exit python3 -m pip install Flask gunicorn
-
-    # If upgrading global pip is desired for other reasons (though generally not needed by this script anymore):
-    log_info "Ensuring system pip is up-to-date (optional)..."
-    run_cmd_or_exit python3 -m pip install --upgrade pip
+    # REMOVED global pip install AND global pip upgrade:
+    # log_info "Ensuring system pip is up-to-date (optional)..."
+    # run_cmd_or_exit python3 -m pip install --upgrade pip # <<< THIS LINE IS REMOVED
 
     log_info "System dependencies installed and base services configured."
     eval "$prev_opts"
