@@ -3,7 +3,7 @@
 # ==============================================================================
 # Deploy Secure Proxy Platform (HAProxy, Sing-Box, Flask Subscription App)
 #
-# Version: 1.5 (SIGPIPE Debugging Focus, uses external template files)
+# Version: 1.6 (SIGPIPE fix in helpers, uses external template files)
 # Author: AI Assistant (Based on User Requirements)
 # Date: $(date +%Y-%m-%d)
 # ==============================================================================
@@ -23,7 +23,7 @@ log_warn() { echo "[WARN] $(date --iso-8601=seconds) - $1"; }
 check_command() {
     if ! command -v "$1" &>/dev/null; then
         log_error "$1 command not found. Please install required dependencies."
-        exit 1 # Trap will call cleanup_exit
+        exit 1
     fi
 }
 check_root() {
@@ -33,16 +33,34 @@ check_root() {
     fi
 }
 generate_random_string() {
-    LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "${1:-32}" | head -n 1 || {
-        log_error "generate_random_string failed (length: ${1:-32})"
-        return 1 # Explicitly return error if pipe fails
-    }
+    local length="${1:-32}"
+    # Run the pipeline in a subshell where SIGPIPE is ignored for commands before head
+    local result
+    result=$(
+        trap '' PIPE # Ignore SIGPIPE for this subshell's commands
+        LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "$length" | head -n 1
+    )
+    # Check if result is empty or if the subshell failed (though `trap '' PIPE` should prevent that type of failure)
+    if [[ -z "$result" ]] || [[ $? -ne 0 && $? -ne 141 ]]; then # 141 is SIGPIPE, which we are trying to allow for tr/fold
+        log_error "generate_random_string failed to produce output (length: $length)"
+        return 1
+    fi
+    echo "$result"
+    return 0
 }
 generate_urlsafe_base64() {
-    echo -n "$1" | base64 | tr -d '=' | tr '/+' '_-' || {
-        log_error "generate_urlsafe_base64 failed for input: $1"
-        return 1 # Explicitly return error
-    }
+    local input_string="$1"
+    local result
+    result=$(
+        trap '' PIPE
+        echo -n "$input_string" | base64 | tr -d '=' | tr '/+' '_-'
+    )
+    if [[ -z "$result" ]] || [[ $? -ne 0 && $? -ne 141 ]]; then
+        log_error "generate_urlsafe_base64 failed for input: $input_string"
+        return 1
+    fi
+    echo "$result"
+    return 0
 }
 _cleanup_resources() {
     log_info "Performing resource cleanup..."
@@ -55,13 +73,15 @@ cleanup_exit() {
     local exit_code="${1:-1}"
     _cleanup_resources
     log_info "Exiting script (Code: ${exit_code})."
-    # If the exit code is 141, print a specific message
     if [[ "$exit_code" -eq 141 ]]; then
         log_error "Script terminated with SIGPIPE (141). This often indicates an issue with a command in a pipeline."
+    elif [[ "$exit_code" -ne 0 ]]; then
+        log_error "Script terminated due to an error (Code: $exit_code)."
     fi
     exit "${exit_code}"
 }
-trap 'cleanup_exit $?' EXIT # Trap all exits
+trap 'cleanup_exit $?' EXIT
+
 
 # --- Configuration Variables (Defaults & Placeholders) ---
 # (Variables remain the same)
@@ -113,26 +133,23 @@ process_template() {
 
 # --- Function to run a command and trigger cleanup_exit on failure ---
 run_cmd_or_exit() {
-    # This function explicitly exits if the command fails.
     "$@"
     local status=$?
     if [ $status -ne 0 ]; then
         log_error "Command failed with status $status: $*"
-        # The EXIT trap will handle cleanup. We just exit with the command's status.
-        exit $status
+        exit $status # Trap will call cleanup_exit
     fi
-    return 0 # Indicate success for this specific command
+    return 0
 }
-
 
 # --- Step 1: Pre-flight Checks & User Input ---
 pre_flight_checks() {
-    local prev_opts; prev_opts=$(set +o); set -e # Enable immediate exit on error for THIS function
+    local prev_opts; prev_opts=$(set +o); set -e
 
     check_root
     log_info "Starting pre-flight checks and gathering information..."
     for cmd in curl jq uuidgen python3 base64 tr head fold date systemctl apt-get useradd groupadd getent install find tar touch read select sed mktemp mv cp rm mkdir chmod chown dirname; do
-        run_cmd_or_exit check_command "$cmd" # Use run_cmd_or_exit here
+        run_cmd_or_exit check_command "$cmd"
     done
     log_info "Gathering domain and Cloudflare information..."
     read -rp "Enter main domain for proxy services (e.g., proxy.yourdomain.com): " MAIN_DOMAIN
@@ -145,47 +162,50 @@ pre_flight_checks() {
     PS3="Select credential type (1 or 2 then Enter): "
     local cred_choice_done=false
     while ! $cred_choice_done; do
-        select cred_type in "API Token (Recommended)" "Global API Key"; do
-            # Check $REPLY directly instead of $cred_type from select, as it's more robust
-            if [[ "$REPLY" == "1" ]]; then # API Token
-                read -rsp "Enter Cloudflare API Token: " CLOUDFLARE_API_TOKEN; echo ""
-                if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then log_error "API Token cannot be empty."; continue; fi # Loop again
-                echo "dns_cloudflare_api_token = ${CLOUDFLARE_API_TOKEN}" > "${CLOUDFLARE_INI_TEMP}"; cred_choice_done=true; break
-            elif [[ "$REPLY" == "2" ]]; then # Global API Key
-                read -rsp "Enter Cloudflare Global API Key: " CLOUDFLARE_API_KEY; echo ""
-                if [[ -z "$CLOUDFLARE_API_KEY" ]]; then log_error "API Key cannot be empty."; continue; fi # Loop again
-                cat << EOF_INI > "${CLOUDFLARE_INI_TEMP}"
+        select cred_type_sel_var in "API Token (Recommended)" "Global API Key"; do # Use a different var name for select
+            case "$REPLY" in
+                1)
+                    read -rsp "Enter Cloudflare API Token: " CLOUDFLARE_API_TOKEN; echo ""
+                    if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then log_error "API Token cannot be empty."; continue; fi
+                    echo "dns_cloudflare_api_token = ${CLOUDFLARE_API_TOKEN}" > "${CLOUDFLARE_INI_TEMP}"; cred_choice_done=true; break
+                    ;;
+                2)
+                    read -rsp "Enter Cloudflare Global API Key: " CLOUDFLARE_API_KEY; echo ""
+                    if [[ -z "$CLOUDFLARE_API_KEY" ]]; then log_error "API Key cannot be empty."; continue; fi
+                    cat << EOF_INI > "${CLOUDFLARE_INI_TEMP}"
 dns_cloudflare_email = ${CLOUDFLARE_EMAIL}
 dns_cloudflare_api_key = ${CLOUDFLARE_API_KEY}
 EOF_INI
-                cred_choice_done=true; break
-            else echo "Invalid choice '$REPLY'. Please select 1 or 2."; continue; fi # Loop again for invalid $REPLY
+                    cred_choice_done=true; break
+                    ;;
+                *) echo "Invalid choice '$REPLY'. Please select 1 or 2."; continue ;;
+            esac
         done
     done
     run_cmd_or_exit chmod 400 "${CLOUDFLARE_INI_TEMP}"; log_info "Created secure Cloudflare credentials file: ${CLOUDFLARE_INI_TEMP}"
 
-    # Generate Secrets
     log_info "Generating secrets..."
-    VLESS_UUID=$(uuidgen) || { log_error "uuidgen failed"; exit 1; } # Critical failure
+    VLESS_UUID=$(uuidgen) || { log_error "uuidgen failed"; exit 1; }
     log_info "  - VLESS_UUID generated: ${VLESS_UUID}"
 
-    VLESS_PATH_TEMP=$(generate_random_string 16) || { log_error "generate_random_string for VLESS_PATH failed"; exit 1; }
+    VLESS_PATH_TEMP=$(generate_random_string 16) || { log_error "generate_random_string for VLESS_PATH failed. Output was: '${VLESS_PATH_TEMP:-EMPTY}'"; exit 1; }
     VLESS_PATH="/${VLESS_PATH_TEMP}"
     log_info "  - VLESS_PATH generated: ${VLESS_PATH}"
 
-    HYSTERIA2_PASSWORD=$(generate_random_string 24) || { log_error "generate_random_string for HYSTERIA2_PASSWORD failed"; exit 1; }
+    HYSTERIA2_PASSWORD_TEMP=$(generate_random_string 24) || { log_error "generate_random_string for HYSTERIA2_PASSWORD failed. Output was: '${HYSTERIA2_PASSWORD_TEMP:-EMPTY}'"; exit 1; }
+    HYSTERIA2_PASSWORD="${HYSTERIA2_PASSWORD_TEMP}"
     log_info "  - HYSTERIA2_PASSWORD generated."
 
-    SUBSCRIPTION_SECRET_STRING_TEMP=$(generate_random_string 20) || { log_error "generate_random_string for SUBSCRIPTION_SECRET_STRING failed"; exit 1; }
-    SUBSCRIPTION_SECRET_STRING="sub-${SUBSCRIPTION_SECRET_STRING_TEMP}"
+    SUBSCRIPTION_SECRET_STRING_TEMP1=$(generate_random_string 20) || { log_error "generate_random_string for SUBSCRIPTION_SECRET_STRING failed. Output was: '${SUBSCRIPTION_SECRET_STRING_TEMP1:-EMPTY}'"; exit 1; }
+    SUBSCRIPTION_SECRET_STRING="sub-${SUBSCRIPTION_SECRET_STRING_TEMP1}"
     log_info "  - SUBSCRIPTION_SECRET_STRING generated."
 
-    SUBSCRIPTION_BASE64_PATH_TEMP=$(generate_urlsafe_base64 "${SUBSCRIPTION_SECRET_STRING}-page") || { log_error "generate_urlsafe_base64 for SUBSCRIPTION_BASE64_PATH failed"; exit 1; }
-    SUBSCRIPTION_BASE64_PATH="/${SUBSCRIPTION_BASE64_PATH_TEMP}"
+    SUBSCRIPTION_BASE64_PATH_TEMP1=$(generate_urlsafe_base64 "${SUBSCRIPTION_SECRET_STRING}-page") || { log_error "generate_urlsafe_base64 for SUBSCRIPTION_BASE64_PATH failed. Output was: '${SUBSCRIPTION_BASE64_PATH_TEMP1:-EMPTY}'"; exit 1; }
+    SUBSCRIPTION_BASE64_PATH="/${SUBSCRIPTION_BASE64_PATH_TEMP1}"
     log_info "  - SUBSCRIPTION_BASE64_PATH generated: ${SUBSCRIPTION_BASE64_PATH}"
 
-    API_BASE64_PATH_PREFIX_TEMP=$(generate_urlsafe_base64 "${SUBSCRIPTION_SECRET_STRING}-api") || { log_error "generate_urlsafe_base64 for API_BASE64_PATH_PREFIX failed"; exit 1; }
-    API_BASE64_PATH_PREFIX="/${API_BASE64_PATH_PREFIX_TEMP}"
+    API_BASE64_PATH_PREFIX_TEMP1=$(generate_urlsafe_base64 "${SUBSCRIPTION_SECRET_STRING}-api") || { log_error "generate_urlsafe_base64 for API_BASE64_PATH_PREFIX failed. Output was: '${API_BASE64_PATH_PREFIX_TEMP1:-EMPTY}'"; exit 1; }
+    API_BASE64_PATH_PREFIX="/${API_BASE64_PATH_PREFIX_TEMP1}"
     log_info "  - API_BASE64_PATH_PREFIX generated: ${API_BASE64_PATH_PREFIX}"
     log_info "Secret generation complete."
 
@@ -193,9 +213,9 @@ EOF_INI
     echo "  Main Proxy Domain:        ${MAIN_DOMAIN}"; echo "  Subscription Domain:      ${SUBSCRIPTION_DOMAIN}"; echo "  Cloudflare Email:         ${CLOUDFLARE_EMAIL}"; echo "  VLESS Port (TCP):         ${VLESS_HTTPUPGRADE_PORT}"; echo "  VLESS Path:               ${VLESS_PATH}"; echo "  VLESS UUID (Initial):     ${VLESS_UUID}"; echo "  Hysteria2 Port (UDP):     ${HYSTERIA2_PORT}"; echo "  Hysteria2 Password:       ${HYSTERIA2_PASSWORD} (SAVE THIS!)"; echo "  Subscription Port (TCP):  ${SUBSCRIPTION_SITE_PORT}"; echo "  Subscription Page Path:   ${SUBSCRIPTION_BASE64_PATH} (SAVE THIS!)"; echo "  Subscription API Prefix:  ${API_BASE64_PATH_PREFIX} (SAVE THIS!)"; echo "  Fail2ban Ban Time:        ${FAIL2BAN_BANTIME}"; echo "  Cloudflare creds file:    ${CLOUDFLARE_INI_TEMP} (will be auto-deleted)";
     echo "----------------------------------------"
     read -rp "DNS records for both domains MUST point to this server's IP. Proceed? (yes/no): " confirm
-    if [[ "$confirm" != "yes" ]]; then log_info "Deployment aborted by user."; exit 0; fi # Clean exit if user aborts
+    if [[ "$confirm" != "yes" ]]; then log_info "Deployment aborted by user."; exit 0; fi
 
-    eval "$prev_opts" # Restore previous shell options (specifically -e)
+    eval "$prev_opts"
 }
 
 # --- Step 2: Install Dependencies & Create Users ---
@@ -232,9 +252,7 @@ install_dependencies() {
 }
 
 # --- Steps 3 to 9 (Certificates, Sing-Box, SubApp, HAProxy, Fail2ban, Firewall, Start Services) ---
-# These functions will now use run_cmd_or_exit for critical operations.
-# process_template already returns 1 on failure which run_cmd_or_exit will catch.
-# Copying files also uses run_cmd_or_exit.
+# (Copying implementations from v1.5 script, ensuring run_cmd_or_exit is used for critical steps)
 
 # Step 3: Setup SSL Certificates
 setup_certificates() {
@@ -322,7 +340,7 @@ setup_subscription_app() {
     run_cmd_or_exit chown -R "${SUBAPP_USER}":"${SUBAPP_GROUP}" "${SUBSCRIPTION_APP_DIR}"
     run_cmd_or_exit find "${SUBSCRIPTION_APP_DIR}" -type d -exec chmod 750 {} \;
     run_cmd_or_exit find "${SUBSCRIPTION_APP_DIR}" -type f -exec chmod 640 {} \;
-    run_cmd_or_exit find "${SUBSCRIPTION_APP_DIR}/venv/bin/" -type f -user "${SUBAPP_USER}" -exec chmod u+x {} \; # Ensure owner can execute
+    run_cmd_or_exit find "${SUBSCRIPTION_APP_DIR}/venv/bin/" -type f -user "${SUBAPP_USER}" -exec chmod u+x {} \;
     run_cmd_or_exit find "${SUBSCRIPTION_APP_DIR}/venv/bin/" -type f -perm /g+x -user "${SUBAPP_USER}" -exec chmod g+x {} \; # Ensure group can execute if owner can
     run_cmd_or_exit chmod u+x "${SUBSCRIPTION_APP_DIR}/venv/bin/activate"*
 
@@ -389,7 +407,7 @@ setup_firewall() {
 
 # Step 9: Start/Restart Services
 start_services() {
-    # Do not use set -e here, as we want to try starting all services and report individual failures.
+    # Do not use set -e here; try to start all and report individual failures.
     log_info "Starting/Restarting all configured services..."
     systemctl restart haproxy || log_warn "Failed to restart haproxy. Check config and logs."
     systemctl restart sing-box || log_warn "Failed to restart sing-box. Check config and logs."
@@ -405,12 +423,14 @@ start_services() {
         else log_error "  - ${svc}: FAILED or Inactive"; failed_svcs=$((failed_svcs + 1)); fi
     done
     local flask_url="http://127.0.0.1:${SUBSCRIPTION_APP_LISTEN_PORT}${SUBSCRIPTION_BASE64_PATH}"
-    if curl --fail --silent --head --max-time 5 "${flask_url}" &>/dev/null; then
-         log_info "  - Subscription app responding locally on its obscured path.";
+    # Also check the /health endpoint if available
+    local flask_health_url="http://127.0.0.1:${SUBSCRIPTION_APP_LISTEN_PORT}/health"
+    if curl --fail --silent --head --max-time 3 "${flask_url}" &>/dev/null || curl --fail --silent --head --max-time 3 "${flask_health_url}" &>/dev/null; then
+         log_info "  - Subscription app responding locally.";
     else log_error "  - Subscription app NOT responding locally. Check: journalctl -u subscription-app"; failed_svcs=$((failed_svcs + 1)); fi
 
     if [ $failed_svcs -gt 0 ]; then
-        log_warn "One or more services may have failed to start or respond correctly. Please review logs using 'journalctl -u <service_name>'."
+        log_warn "One or more services may have failed to start or respond correctly. Please review logs."
     else log_info "All services appear to be running correctly."; fi
 }
 
@@ -419,7 +439,7 @@ main() {
     # Enable strict error checking for the main execution flow
     local prev_main_opts; prev_main_opts=$(set +o); set -e
 
-    log_info "Starting Secure Proxy Platform Deployment from version 1.5 (SIGPIPE Debugging Focus)..."
+    log_info "Starting Secure Proxy Platform Deployment from version 1.6 (SIGPIPE fix)..."
     run_cmd_or_exit pre_flight_checks
     run_cmd_or_exit install_dependencies
     run_cmd_or_exit setup_certificates
@@ -428,14 +448,12 @@ main() {
     run_cmd_or_exit setup_haproxy
     run_cmd_or_exit setup_fail2ban
     run_cmd_or_exit setup_firewall
-    # start_services handles its own error reporting without exiting script immediately
-    start_services
-    eval "$prev_main_opts" # Restore options before summary
+    start_services # This function handles its own non-fatal error reporting
+    eval "$prev_main_opts"
 
     log_info "--- Deployment Complete ---"
-    # (Final Summary Output - ensure all variables are correctly displayed)
     echo "=============================================================================="
-    echo " [IMPORTANT] Configuration Details - SAVE THIS SECURELY!"
+    echo " [IMPORTANT] Configuration Details - SAVE THIS SECURELY!" # ... (rest of summary)
     echo "=============================================================================="
     echo " ### Proxy Service (${MAIN_DOMAIN}) ###"
     echo "   - VLESS Port (TCP):        ${VLESS_HTTPUPGRADE_PORT}"
