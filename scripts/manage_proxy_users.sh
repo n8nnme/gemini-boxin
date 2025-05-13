@@ -1,293 +1,338 @@
 #!/bin/bash
 # ======================================================================
-# VLESS User Management Script for Sing-Box
-# Author: AI Assistant (Based on User Requirements)
-# Purpose: Add, list, and delete VLESS users in the Sing-Box configuration.
-# Location: /usr/local/sbin/manage_proxy_users (when deployed)
+# Proxy User Management Script for Sing-Box (VLESS & Hysteria2)
+# Version 2.0
+# Author: AI Assistant & User
+# Purpose: Add, list, and delete VLESS and Hysteria2 users.
 # ======================================================================
 
-# Exit on error, treat unset vars as error
 set -euo pipefail
 
 # --- Configuration ---
-# These paths must match the paths used in the deployment script and Sing-Box setup
 SINGBOX_CONFIG="/etc/sing-box/config.json"
-USER_MAP_FILE="/etc/sing-box/user_map.txt"
+VLESS_USER_MAP_FILE="/etc/sing-box/vless_user_map.txt" # Stores username:uuid for VLESS
+HY2_USER_MAP_FILE="/etc/sing-box/hy2_user_map.txt"     # Stores username (only) for Hysteria2
 BACKUP_DIR="/etc/sing-box/backups"
-# User and Group that own the Sing-Box configuration files
-SINGBOX_USER="singbox"
-SINGBOX_GROUP="singbox"
+SINGBOX_USER="singbox"  # User that runs sing-box and owns its files
+SINGBOX_GROUP="singbox" # Group for sing-box
+
+VLESS_INBOUND_TAG="vless-in" # Tag for VLESS inbound in Sing-Box config
+HY2_INBOUND_TAG="hy2-in"     # Tag for Hysteria2 inbound in Sing-Box config
 
 # --- Helper Functions ---
-log_info() { echo "[INFO] $(date +'%Y%m%d_%H%M%S') - $1"; }
-log_error() { echo "[ERROR] $(date +'%Y%m%d_%H%M%S') - $1" >&2; }
+log_info() { echo "[INFO] $(date +'%Y-%m-%d %H:%M:%S') - $1"; }
+log_error() { echo "[ERROR] $(date +'%Y-%m-%d %H:%M:%S') - $1" >&2; }
+log_warn() { echo "[WARN] $(date +'%Y-%m-%d %H:%M:%S') - $1"; }
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-       log_error "This script must be run as root (or using sudo) to modify system files and reload services."
+       log_error "This script must be run as root (or using sudo)."
        exit 1
     fi
 }
+
 check_deps() {
     command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. Please install it (e.g., apt install jq)."; exit 1; }
     command -v uuidgen >/dev/null 2>&1 || { log_error "uuidgen is required but not installed. Please install it (e.g., apt install uuid-runtime)."; exit 1; }
-    command -v systemctl >/dev/null 2>&1 || { log_error "systemctl is required."; exit 1; }
+    command -v systemctl >/dev/null 2>&1 || { log_error "systemctl is required for service management."; exit 1; }
 }
+
 backup_config() {
     # Ensure backup directory exists and has correct permissions
-    mkdir -p "$BACKUP_DIR"
-    chown "${SINGBOX_USER}":"${SINGBOX_GROUP}" "$BACKUP_DIR"
-    chmod 750 "$BACKUP_DIR" # Owner rwx, group rx
+    if ! mkdir -p "$BACKUP_DIR"; then log_error "Failed to create backup directory: $BACKUP_DIR"; exit 1; fi
+    if ! chown "${SINGBOX_USER}":"${SINGBOX_GROUP}" "$BACKUP_DIR"; then log_warn "Failed to set ownership on backup directory."; fi
+    if ! chmod 750 "$BACKUP_DIR"; then log_warn "Failed to set permissions on backup directory."; fi
 
-    local backup_file="${BACKUP_DIR}/config.json_$(date +%Y%m%d_%H%M%S)"
+    local backup_file="${BACKUP_DIR}/config.json_$(date +'%Y%m%d_%H%M%S')"
     if cp "$SINGBOX_CONFIG" "$backup_file"; then
         log_info "Config backed up to $backup_file";
     else
-        log_error "Failed to create backup file at $backup_file";
-        # Decide if this is critical enough to stop
-        # exit 1; # Uncomment to make backup failure critical
+        log_error "CRITICAL: Failed to create backup file at $backup_file. Aborting operation.";
+        exit 1; # Backup failure is critical before modifying config
     fi
 }
-set_ownership_perms() {
-    # Ensure config and map file have correct owner and restrictive permissions
-    if chown "${SINGBOX_USER}":"${SINGBOX_GROUP}" "$SINGBOX_CONFIG" "$USER_MAP_FILE"; then
-        chmod 640 "$SINGBOX_CONFIG" "$USER_MAP_FILE" # Owner rw, Group r, Other none
-    else
-      log_error "Failed to set ownership/permissions on configuration files."
-    fi
-}
-reload_singbox() {
-    log_info "Reloading Sing-Box service (via restart)..."
-    # Use restart as Sing-Box might not have a reload mechanism for config changes
-    if systemctl restart sing-box; then
-        log_info "Sing-Box restarted successfully."
-        return 0 # Success
-    else
-        log_error "!!! Failed to restart Sing-Box after config change. !!!"
-        log_error "Check Sing-Box status ('systemctl status sing-box') and logs ('journalctl -u sing-box')."
-        log_error "Attempting to restore previous config from latest backup..."
 
+set_ownership_perms_config() {
+    if ! chown "${SINGBOX_USER}":"${SINGBOX_GROUP}" "$SINGBOX_CONFIG"; then log_warn "Failed to set ownership on ${SINGBOX_CONFIG}"; fi
+    if ! chmod 640 "$SINGBOX_CONFIG"; then log_warn "Failed to set permissions on ${SINGBOX_CONFIG}"; fi
+}
+
+set_ownership_perms_map() {
+    local map_file="$1"
+    touch "$map_file" # Ensure it exists before chown/chmod
+    if ! chown "${SINGBOX_USER}":"${SINGBOX_GROUP}" "$map_file"; then log_warn "Failed to set ownership on ${map_file}"; fi
+    if ! chmod 640 "$map_file"; then log_warn "Failed to set permissions on ${map_file}"; fi
+}
+
+reload_singbox() {
+    log_info "Attempting to reload/restart Sing-Box service..."
+    # Attempt reload first, as it's less disruptive
+    if systemctl is-active --quiet sing-box && systemctl reload sing-box &>/dev/null; then
+        log_info "Sing-Box reloaded successfully."
+        # Brief pause to see if it crashes post-reload
+        sleep 1
+        if systemctl is-active --quiet sing-box; then
+            return 0 # Reload successful and service is still active
+        else
+            log_warn "Sing-Box became inactive after reload attempt. Will try full restart."
+        fi
+    elif ! systemctl is-active --quiet sing-box; then
+        log_info "Sing-Box was not active. Will try to start it."
+    else
+        log_info "Reload not supported or failed. Will try full restart."
+    fi
+
+    # If reload failed or service was inactive, try restart
+    if systemctl restart sing-box; then
+        log_info "Sing-Box (re)started successfully."
+        return 0
+    else
+        log_error "!!! Failed to restart/reload Sing-Box after configuration change. !!!"
+        log_error "Please check Sing-Box status ('systemctl status sing-box') and logs ('journalctl -u sing-box --no-pager -n 50')."
+        
         local LATEST_BACKUP
-        # Find the most recent backup file
         LATEST_BACKUP=$(ls -t "${BACKUP_DIR}/config.json_"* 2>/dev/null | head -n 1)
 
         if [ -n "$LATEST_BACKUP" ] && [ -f "$LATEST_BACKUP" ]; then
+            log_info "Attempting to restore previous config from: $LATEST_BACKUP"
             if cp "$LATEST_BACKUP" "$SINGBOX_CONFIG"; then
                 log_info "Successfully restored config from $LATEST_BACKUP."
-                set_ownership_perms # Ensure restored file has correct perms too
-                log_info "Attempting restart again with restored config..."
-                # Try restarting again with the restored config
+                set_ownership_perms_config # Ensure restored file has correct perms too
+                log_info "Attempting (re)start again with restored config..."
                 if systemctl restart sing-box; then
-                     log_info "Sing-Box restarted successfully with restored config."
-                     log_error "The previous config change caused an error and was reverted."
-                     return 1 # Indicate failure despite recovery
+                     log_info "Sing-Box (re)started successfully with restored config."
+                     log_error "The previous config change caused an error and has been reverted."
+                     return 1 # Indicate failure of the original operation despite recovery
                 else
-                     log_error "!!! Failed to restart Sing-Box even after restoring backup. MANUAL INTERVENTION REQUIRED. !!!"
-                     return 1 # Indicate failure
+                     log_error "!!! CRITICAL: Failed to (re)start Sing-Box even after restoring backup. MANUAL INTERVENTION REQUIRED. !!!"
+                     return 1
                 fi
             else
-                 log_error "!!! Failed to copy backup file $LATEST_BACKUP to $SINGBOX_CONFIG. MANUAL INTERVENTION REQUIRED. !!!"
-                 return 1 # Indicate failure
+                 log_error "!!! CRITICAL: Failed to copy backup file $LATEST_BACKUP to $SINGBOX_CONFIG. MANUAL INTERVENTION REQUIRED. !!!"
+                 return 1
             fi
         else
-             log_error "!!! No backup found in $BACKUP_DIR to restore. MANUAL INTERVENTION REQUIRED. !!!"
-             return 1 # Indicate failure
+             log_error "!!! CRITICAL: No backup found in $BACKUP_DIR to restore. MANUAL INTERVENTION REQUIRED. !!!"
+             return 1
         fi
     fi
 }
 
-# --- Command Functions ---
-
-add_user() {
+# --- VLESS User Functions ---
+add_vless_user() {
     local username="$1"
-    # Validate username presence and format
-    if [ -z "$username" ]; then log_error "Username cannot be empty."; usage; exit 1; fi
-    if ! [[ "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then log_error "Invalid username format. Use only alphanumeric characters, hyphens (-), or underscores (_)."; exit 1; fi
+    if [ -z "$username" ]; then log_error "VLESS username cannot be empty."; usage; exit 1; fi
+    if ! [[ "$username" =~ ^[a-zA-Z0-9_.-]+$ ]]; then log_error "Invalid VLESS username format. Use alphanumeric, underscore, hyphen, dot."; exit 1; fi
+    if grep -q -x -e "${username}:.*" "$VLESS_USER_MAP_FILE"; then log_error "VLESS username '$username' already exists in map file."; exit 1; fi
 
-    # Check if username already exists in the map file
-    if grep -q -x -e "${username}:.*" "$USER_MAP_FILE"; then # Use -x for whole line match (username part)
-        log_error "Username '$username' already exists in map file (${USER_MAP_FILE}).";
-        exit 1;
-    fi
-
-    # Generate a new UUID
     local new_uuid; new_uuid=$(uuidgen)
-
-    # Double-check if this UUID somehow already exists in the config (extremely unlikely)
-    if jq -e --arg uuid "$new_uuid" '(.inbounds[] | select(.tag == "vless-in").users[] | select(.uuid == $uuid))' "$SINGBOX_CONFIG" > /dev/null; then
-        log_error "Generated UUID collision detected ($new_uuid). This is highly unusual. Please try again.";
-        exit 1;
+    if jq -e --arg uuid "$new_uuid" --arg tag "$VLESS_INBOUND_TAG" \
+        '(.inbounds[] | select(.tag == $tag).users[]? | select(.uuid == $uuid))' \
+        "$SINGBOX_CONFIG" > /dev/null; then
+        log_error "Generated VLESS UUID collision ($new_uuid). This is highly unusual. Please try again."; exit 1;
     fi
 
-    log_info "Attempting to add user '$username' with UUID: $new_uuid"
-
-    # 1. Add to map file first (less critical if this fails before config change)
-    echo "${username}:${new_uuid}" >> "$USER_MAP_FILE"
-    set_ownership_perms # Update map file perms
-
-    # 2. Backup the current config
+    log_info "Attempting to add VLESS user '$username' with UUID: $new_uuid"
+    echo "${username}:${new_uuid}" >> "$VLESS_USER_MAP_FILE"; set_ownership_perms_map "$VLESS_USER_MAP_FILE"
+    
     backup_config
-
-    # 3. Add UUID to Sing-Box config using jq
     local temp_config; temp_config=$(mktemp)
-    # Use jq to add the new user object to the 'users' array within the 'vless-in' inbound
-    if jq --arg uuid "$new_uuid" '
-        # Find the vless-in inbound object and modify its users array
-        (.inbounds[] | select(.tag == "vless-in").users) += [{"uuid": $uuid, "flow": ""}]
-    ' "$SINGBOX_CONFIG" > "$temp_config"; then
-        # If jq succeeded, replace the original config with the temp file
-        mv "$temp_config" "$SINGBOX_CONFIG"
-    else
-        log_error "Failed to update $SINGBOX_CONFIG using jq. Check JSON syntax if manually edited.";
-        rm -f "$temp_config" # Clean up temp file
-        # Attempt to reload anyway, which should trigger the restore logic if jq failed badly
-        reload_singbox
-        exit 1 # Exit indicating failure
-    fi
-
-    # 4. Set ownership and permissions on the modified config file
-    set_ownership_perms
-
-    # 5. Reload Sing-Box and report final status
-    if reload_singbox; then
-        log_info "User '$username' added successfully. UUID: $new_uuid"
-    else
-        # The reload_singbox function already logs errors and attempts restore
-        log_error "User addition for '$username' failed because the service could not be reloaded. The configuration may have been restored."
-        exit 1 # Exit indicating failure
-    fi
+    jq --arg uuid "$new_uuid" --arg tag "$VLESS_INBOUND_TAG" \
+       '(.inbounds[] | select(.tag == $tag).users) += [{"uuid": $uuid, "flow": ""}]' \
+       "$SINGBOX_CONFIG" > "$temp_config" || { 
+           log_error "jq command failed during VLESS user addition."; rm -f "$temp_config"; reload_singbox; exit 1; 
+       }
+    mv "$temp_config" "$SINGBOX_CONFIG"; set_ownership_perms_config
+    
+    if reload_singbox; then log_info "VLESS user '$username' added successfully. UUID: $new_uuid";
+    else log_error "VLESS user '$username' addition failed because the service could not be reloaded/restarted."; exit 1; fi
 }
 
-list_users() {
-    log_info "--- User List ---"
-    log_info "[Format: Username:UUID (from ${USER_MAP_FILE})]"
-    if [ -s "$USER_MAP_FILE" ]; then
-        # Sort the map file for better readability
-        sort "$USER_MAP_FILE"
-    else
-        log_info "(No users found in map file)"
-    fi
-    echo # Blank line
-
-    log_info "[UUIDs currently active in Sing-Box config (${SINGBOX_CONFIG})]"
-    # Use jq to extract UUIDs, check if array exists and has elements
-    if jq -e '.inbounds[]? | select(.tag == "vless-in") | .users? | length > 0' "$SINGBOX_CONFIG" > /dev/null 2>&1; then
-       # If users array exists and is not empty, print UUIDs
-       jq -r '.inbounds[] | select(.tag == "vless-in") | .users[] .uuid' "$SINGBOX_CONFIG" | sort
-    else
-       log_info "(No VLESS users found in Sing-Box config)"
-    fi
-    log_info "--- End List ---"
+list_vless_users() {
+    log_info "--- VLESS User List ---"
+    log_info "[Format: Username:UUID (from ${VLESS_USER_MAP_FILE})]"
+    if [ -s "$VLESS_USER_MAP_FILE" ]; then sort "$VLESS_USER_MAP_FILE"; else log_info "(No users found in VLESS map file)"; fi
+    echo ""
+    log_info "[UUIDs currently active in Sing-Box config (${SINGBOX_CONFIG} for tag '${VLESS_INBOUND_TAG}')]"
+    if jq -e --arg tag "$VLESS_INBOUND_TAG" '(.inbounds[]? | select(.tag == $tag) | .users? | length > 0)' "$SINGBOX_CONFIG" > /dev/null 2>&1; then
+       jq -r --arg tag "$VLESS_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .users[] .uuid' "$SINGBOX_CONFIG" | sort
+    else log_info "(No VLESS users found in Sing-Box config for tag '${VLESS_INBOUND_TAG}')"; fi
+    log_info "--- End VLESS List ---"
 }
 
-delete_user() {
+delete_vless_user() {
     local identifier="$1"
+    if [ -z "$identifier" ]; then log_error "VLESS username or UUID must be provided for deletion."; usage; exit 1; fi
+
     local uuid_to_delete=""
-    local username_to_delete="" # Track username for logging
+    local username_to_delete=""
 
-    if [ -z "$identifier" ]; then log_error "Username or UUID must be provided for deletion."; usage; exit 1; fi
-
-    # Determine if identifier is UUID or username
-    # Basic check: does it look like a UUID?
-    if [[ "$identifier" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    if [[ "$identifier" =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]]; then # UUID format
         uuid_to_delete="$identifier"
-        log_info "Attempting to delete by UUID: $uuid_to_delete"
-        # Find associated username in map for logging/completeness
-        username_to_delete=$(grep -e ":${uuid_to_delete}$" "$USER_MAP_FILE" | cut -d':' -f1)
-        [[ -z "$username_to_delete" ]] && username_to_delete="(Username not found in map)"
-    else
-        # Assume it's a username
+        username_to_delete=$(grep -e ":${uuid_to_delete}$" "$VLESS_USER_MAP_FILE" | cut -d':' -f1)
+        [[ -z "$username_to_delete" ]] && username_to_delete="(Username not found in map for this UUID)"
+    else # Assume username
         username_to_delete="$identifier"
-        log_info "Attempting to delete by username: $username_to_delete"
-        local found_line
-        # Match the line starting exactly with the username followed by ':'
-        found_line=$(grep -e "^${username_to_delete}:" "$USER_MAP_FILE")
+        local found_line; found_line=$(grep -e "^${username_to_delete}:" "$VLESS_USER_MAP_FILE")
         if [ -n "$found_line" ]; then
             uuid_to_delete=$(echo "$found_line" | cut -d':' -f2)
-            log_info "Found corresponding UUID: $uuid_to_delete"
         else
-            log_error "Username '$username_to_delete' not found in map file (${USER_MAP_FILE}). Cannot determine UUID to delete.";
-            exit 1;
+            log_error "VLESS username '$username_to_delete' not found in map file (${VLESS_USER_MAP_FILE})."; exit 1;
         fi
     fi
 
-    # Verify that the UUID actually exists in the Sing-Box config before proceeding
-    if ! jq -e --arg uuid "$uuid_to_delete" '(.inbounds[] | select(.tag == "vless-in").users[] | select(.uuid == $uuid))' "$SINGBOX_CONFIG" > /dev/null; then
-         log_error "UUID $uuid_to_delete not found in the active Sing-Box config (${SINGBOX_CONFIG}). User might have been deleted already."
-         # Perform map file cleanup just in case
-         if grep -q -e ":${uuid_to_delete}$" "$USER_MAP_FILE"; then
-             log_info "UUID found in map file. Removing dangling map entry for '$username_to_delete'..."
-             # Use sed to delete the line matching the UUID at the end
-             sed -i.bak "/:${uuid_to_delete}$/d" "$USER_MAP_FILE"; rm -f "${USER_MAP_FILE}.bak"
-             set_ownership_perms
-             log_info "Dangling map entry removed."
+    if ! jq -e --arg uuid "$uuid_to_delete" --arg tag "$VLESS_INBOUND_TAG" \
+        '(.inbounds[] | select(.tag == $tag).users[]? | select(.uuid == $uuid))' \
+        "$SINGBOX_CONFIG" > /dev/null; then
+         log_warn "VLESS UUID $uuid_to_delete (for user '$username_to_delete') not found in Sing-Box config."
+         if grep -q -e ":${uuid_to_delete}$" "$VLESS_USER_MAP_FILE"; then # Check map file
+             log_info "Removing dangling VLESS map entry for '$username_to_delete'..."
+             sed -i.bak "/:${uuid_to_delete}$/d" "$VLESS_USER_MAP_FILE"; rm -f "${VLESS_USER_MAP_FILE}.bak"
+             set_ownership_perms_map "$VLESS_USER_MAP_FILE"
          fi
-         exit 1 # Exit as the user isn't in the active config
+         exit 0 # Not an error if already gone from config
      fi
 
-    log_info "Proceeding to delete user '$username_to_delete' (UUID: $uuid_to_delete)"
+    log_info "Proceeding to delete VLESS user '$username_to_delete' (UUID: $uuid_to_delete)"
+    if grep -q -e ":${uuid_to_delete}$" "$VLESS_USER_MAP_FILE"; then
+        sed -i.bak "/:${uuid_to_delete}$/d" "$VLESS_USER_MAP_FILE"; rm -f "${VLESS_USER_MAP_FILE}.bak"; set_ownership_perms_map "$VLESS_USER_MAP_FILE"; fi
 
-    # 1. Delete from map file
-    if grep -q -e ":${uuid_to_delete}$" "$USER_MAP_FILE"; then
-        log_info "Removing user from map file (${USER_MAP_FILE})...";
-        sed -i.bak "/:${uuid_to_delete}$/d" "$USER_MAP_FILE"; rm -f "${USER_MAP_FILE}.bak";
-        set_ownership_perms
-    else
-        log_info "UUID $uuid_to_delete was not found in the map file (maybe removed previously or added manually?).";
-    fi
-
-    # 2. Backup the current config
     backup_config
-
-    # 3. Delete UUID from Sing-Box config using jq
     local temp_config; temp_config=$(mktemp)
-    # Use jq to filter the 'users' array, keeping only elements whose UUID does *not* match the one to delete
-    if jq --arg uuid "$uuid_to_delete" '
-        (.inbounds[] | select(.tag == "vless-in").users) |= map(select(.uuid != $uuid))
-    ' "$SINGBOX_CONFIG" > "$temp_config"; then
-        mv "$temp_config" "$SINGBOX_CONFIG"
-    else
-        log_error "Failed to update $SINGBOX_CONFIG using jq during deletion."; rm -f "$temp_config";
-        reload_singbox # Attempt reload, should trigger restore
-        exit 1
-    fi
+    jq --arg uuid "$uuid_to_delete" --arg tag "$VLESS_INBOUND_TAG" \
+       '(.inbounds[] | select(.tag == $tag).users) |= map(select(.uuid != $uuid))' \
+       "$SINGBOX_CONFIG" > "$temp_config" || {
+           log_error "jq command failed during VLESS user deletion."; rm -f "$temp_config"; reload_singbox; exit 1;
+       }
+    mv "$temp_config" "$SINGBOX_CONFIG"; set_ownership_perms_config
 
-    # 4. Set ownership and permissions
-    set_ownership_perms
+    if reload_singbox; then log_info "VLESS user '$username_to_delete' deleted successfully.";
+    else log_error "VLESS user '$username_to_delete' deletion failed (service reload issue)."; exit 1; fi
+}
 
-    # 5. Reload Sing-Box and report status
-    if reload_singbox; then
-        log_info "User '$username_to_delete' (UUID: $uuid_to_delete) deleted successfully."
-    else
-        log_error "User deletion for '$username_to_delete' failed because the service could not be reloaded. The configuration may have been restored."
-        exit 1
+# --- Hysteria2 User Functions ---
+add_hy2_user() {
+    local username="$1"
+    local password="$2"
+    if [ -z "$username" ] || [ -z "$password" ]; then log_error "Hysteria2 username AND password are required."; usage; exit 1; fi
+    if ! [[ "$username" =~ ^[a-zA-Z0-9_.-]+$ ]]; then log_error "Invalid Hysteria2 username format. Use alphanumeric, underscore, hyphen, dot."; exit 1; fi
+    # Basic password check - ensure it's not obviously trivial, though this is weak.
+    if [ ${#password} -lt 8 ]; then log_warn "Hysteria2 password for '$username' is shorter than 8 characters. Consider a stronger password."; fi
+
+
+    if jq -e --arg name "$username" --arg tag "$HY2_INBOUND_TAG" \
+        '(.inbounds[] | select(.tag == $tag).users[]? | select(.name == $name))' \
+        "$SINGBOX_CONFIG" > /dev/null; then
+        log_error "Hysteria2 username '$username' already exists in Sing-Box config."; exit 1;
     fi
+    # Also check map file
+    if grep -q -x -e "^${username}$" "$HY2_USER_MAP_FILE"; then log_warn "Hysteria2 username '$username' found in map file but not in config. This is unusual. Will proceed to add to config."; fi
+
+
+    log_info "Attempting to add Hysteria2 user '$username'"
+    echo "${username}" >> "$HY2_USER_MAP_FILE"; set_ownership_perms_map "$HY2_USER_MAP_FILE" # Map stores only username
+
+    backup_config
+    local temp_config; temp_config=$(mktemp)
+    jq --arg name "$username" --arg pass "$password" --arg tag "$HY2_INBOUND_TAG" \
+       '(.inbounds[] | select(.tag == $tag).users) += [{"name": $name, "password": $pass}]' \
+       "$SINGBOX_CONFIG" > "$temp_config" || {
+           log_error "jq command failed during Hysteria2 user addition."; rm -f "$temp_config"; reload_singbox; exit 1;
+       }
+    mv "$temp_config" "$SINGBOX_CONFIG"; set_ownership_perms_config
+
+    if reload_singbox; then log_info "Hysteria2 user '$username' added successfully.";
+    else log_error "Hysteria2 user '$username' addition failed (service reload issue)."; exit 1; fi
+}
+
+list_hy2_users() {
+    log_info "--- Hysteria2 User List ---"
+    log_info "[Usernames (from ${HY2_USER_MAP_FILE})]"
+    if [ -s "$HY2_USER_MAP_FILE" ]; then sort "$HY2_USER_MAP_FILE"; else log_info "(No users found in Hysteria2 map file)"; fi
+    echo ""
+    log_info "[Usernames currently in Sing-Box config (${SINGBOX_CONFIG} for tag '${HY2_INBOUND_TAG}') - Passwords are not displayed]"
+    if jq -e --arg tag "$HY2_INBOUND_TAG" '(.inbounds[]? | select(.tag == $tag) | .users? | length > 0)' "$SINGBOX_CONFIG" > /dev/null 2>&1; then
+       # List users that have a 'name' field
+       jq -r --arg tag "$HY2_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .users[] | .name? | select(. != null)' "$SINGBOX_CONFIG" | sort
+       # Identify if there are users without a 'name' (shouldn't happen with this script but good for diagnostics)
+       if jq -e --arg tag "$HY2_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .users[] | select(.name == null)' "$SINGBOX_CONFIG" > /dev/null; then
+           log_warn "Warning: Some Hysteria2 users in config do not have a 'name' field."
+       fi
+    else log_info "(No Hysteria2 users found in Sing-Box config for tag '${HY2_INBOUND_TAG}')"; fi
+    log_info "--- End Hysteria2 List ---"
+}
+
+delete_hy2_user() {
+    local username="$1"
+    if [ -z "$username" ]; then log_error "Hysteria2 username must be provided for deletion."; usage; exit 1; fi
+
+    if ! jq -e --arg name "$username" --arg tag "$HY2_INBOUND_TAG" \
+        '(.inbounds[] | select(.tag == $tag).users[]? | select(.name == $name))' \
+        "$SINGBOX_CONFIG" > /dev/null; then
+         log_warn "Hysteria2 username '$username' not found in Sing-Box config."
+         if grep -q -x -e "^${username}$" "$HY2_USER_MAP_FILE"; then # Check map file
+             log_info "Removing dangling Hysteria2 map entry for '$username'..."
+             sed -i.bak "/^${username}$/d" "$HY2_USER_MAP_FILE"; rm -f "${HY2_USER_MAP_FILE}.bak"
+             set_ownership_perms_map "$HY2_USER_MAP_FILE"
+         fi
+         exit 0 # Not an error if already gone from config
+     fi
+
+    log_info "Proceeding to delete Hysteria2 user '$username'"
+    if grep -q -x -e "^${username}$" "$HY2_USER_MAP_FILE"; then
+        sed -i.bak "/^${username}$/d" "$HY2_USER_MAP_FILE"; rm -f "${HY2_USER_MAP_FILE}.bak"; set_ownership_perms_map "$HY2_USER_MAP_FILE"; fi
+
+    backup_config
+    local temp_config; temp_config=$(mktemp)
+    jq --arg name "$username" --arg tag "$HY2_INBOUND_TAG" \
+       '(.inbounds[] | select(.tag == $tag).users) |= map(select(.name != $name))' \
+       "$SINGBOX_CONFIG" > "$temp_config" || {
+           log_error "jq command failed during Hysteria2 user deletion."; rm -f "$temp_config"; reload_singbox; exit 1;
+       }
+    mv "$temp_config" "$SINGBOX_CONFIG"; set_ownership_perms_config
+
+    if reload_singbox; then log_info "Hysteria2 user '$username' deleted successfully.";
+    else log_error "Hysteria2 user '$username' deletion failed (service reload issue)."; exit 1; fi
 }
 
 usage() {
-  echo "Usage: $0 <command> [options]"
-  echo "Commands:"
-  echo "  add <username>       Add a new VLESS user (generates unique UUID)."
-  echo "  del <username|uuid>  Delete a VLESS user by username (from map) or exact UUID."
-  echo "  list | ls            List users from map file and UUIDs from active config."
+  echo "Usage: $0 <command> [arguments...]"
+  echo ""
+  echo "VLESS User Management (via tag: '$VLESS_INBOUND_TAG'):"
+  echo "  $0 add_vless <username>"
+  echo "     Adds a new VLESS user with a generated UUID."
+  echo "  $0 del_vless <username | uuid>"
+  echo "     Deletes a VLESS user by their username (from map) or exact UUID."
+  echo "  $0 list_vless"
+  echo "     Lists VLESS users from the map file and UUIDs from Sing-Box config."
+  echo ""
+  echo "Hysteria2 User Management (via tag: '$HY2_INBOUND_TAG'):"
+  echo "  $0 add_hy2 <username> <password>"
+  echo "     Adds a new Hysteria2 user with the given username and password."
+  echo "  $0 del_hy2 <username>"
+  echo "     Deletes a Hysteria2 user by their username."
+  echo "  $0 list_hy2"
+  echo "     Lists Hysteria2 usernames from the map file and Sing-Box config."
   echo ""
   echo "Example:"
-  echo "  sudo $0 add my_new_user"
-  echo "  sudo $0 list"
-  echo "  sudo $0 del my_new_user"
-  echo "  sudo $0 del a1b2c3d4-e5f6-7890-1234-567890abcdef"
+  echo "  sudo $0 add_vless my_user_vless"
+  echo "  sudo $0 add_hy2 my_user_hy2 MyStr0ngP@ssw0rd"
+  echo "  sudo $0 list_vless"
+  echo "  sudo $0 list_hy2"
+  echo "  sudo $0 del_hy2 my_user_hy2"
 }
 
 # --- Main Script Logic ---
 check_root
 check_deps
 
-# Ensure map file exists and has correct permissions before running commands
-# This guards against errors if the file was somehow deleted.
-touch "$USER_MAP_FILE"; set_ownership_perms
+# Ensure map files exist with correct permissions before any operation
+set_ownership_perms_map "$VLESS_USER_MAP_FILE"
+set_ownership_perms_map "$HY2_USER_MAP_FILE"
 
-# Ensure config file exists
+# Ensure Sing-Box config file exists
 if [ ! -f "$SINGBOX_CONFIG" ]; then
-    log_error "Sing-Box configuration file not found at ${SINGBOX_CONFIG}";
+    log_error "Sing-Box configuration file not found at: ${SINGBOX_CONFIG}";
     exit 1;
 fi
 
@@ -298,18 +343,17 @@ if [ $# -eq 0 ]; then
 fi
 
 COMMAND=$1
-shift # Remove command from arguments, remaining args passed to functions
+shift # Remove command from arguments, rest are passed to functions
 
 case $COMMAND in
-  add)
-    add_user "$@"
-    ;;
-  del | delete)
-    delete_user "$@"
-    ;;
-  list | ls)
-    list_users
-    ;;
+  add_vless)          add_vless "$@";;
+  del_vless)          delete_vless "$@";;
+  list_vless)         list_vless;;
+
+  add_hy2)            add_hy2 "$@";;
+  del_hy2)            delete_hy2 "$@";;
+  list_hy2)           list_hy2;;
+  
   *)
     log_error "Unknown command: $COMMAND"
     usage
