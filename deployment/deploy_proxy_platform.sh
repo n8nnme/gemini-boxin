@@ -34,29 +34,64 @@ check_root() {
 }
 generate_random_string() {
     local length="${1:-32}"
-    # Run the pipeline in a subshell where SIGPIPE is ignored for commands before head
+    local random_data
     local result
+
+    # Try OpenSSL first, as it's generally very robust
+    if command -v openssl &>/dev/null; then
+        # Generate more bytes than needed to account for base64/hex encoding expansion
+        # For hex, each byte becomes 2 hex chars. For base64, 3 bytes become 4 chars.
+        # Let's aim for roughly length characters.
+        # If we want 'length' alphanumeric chars, we might need more raw bytes.
+        # This approach produces hex, then filters for alphanumeric.
+        random_data=$(openssl rand -hex $((length * 2)) 2>/dev/null | tr -dc 'a-zA-Z0-9' 2>/dev/null | fold -w "$length" 2>/dev/null | head -n 1)
+        if [[ -n "$random_data" ]] && [[ ${#random_data} -ge "$((length / 2))" ]]; then # Check if we got something substantial
+            echo "$random_data" | head -c "$length" # Ensure exact length
+            return 0
+        else
+            log_warn "openssl rand method for generate_random_string failed or produced short string. Falling back."
+        fi
+    fi
+
+    # Fallback to /dev/urandom method with explicit SIGPIPE trap and checks
+    log_info "generate_random_string: Using /dev/urandom fallback for length $length"
     result=$(
-        trap '' PIPE # Ignore SIGPIPE for this subshell's commands
-        LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "$length" | head -n 1
+        ( # Start subshell
+            trap '' PIPE # Ignore SIGPIPE for commands in this subshell
+            LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "$length" | head -n 1
+        ) # End subshell
     )
-    # Check if result is empty or if the subshell failed (though `trap '' PIPE` should prevent that type of failure)
-    if [[ -z "$result" ]] || [[ $? -ne 0 && $? -ne 141 ]]; then # 141 is SIGPIPE, which we are trying to allow for tr/fold
-        log_error "generate_random_string failed to produce output (length: $length)"
+    local subshell_status=$?
+
+    # Check if result is empty or if the subshell failed (excluding SIGPIPE which is 141)
+    if [[ -z "$result" ]] || { [[ "$subshell_status" -ne 0 ]] && [[ "$subshell_status" -ne 141 ]]; }; then
+        log_error "generate_random_string (/dev/urandom) failed to produce output (length: $length, status: $subshell_status)"
         return 1
     fi
     echo "$result"
     return 0
 }
+
 generate_urlsafe_base64() {
     local input_string="$1"
     local result
+
+    if [[ -z "$input_string" ]]; then
+        log_error "generate_urlsafe_base64 received empty input."
+        return 1
+    fi
+    
+    # Using subshell and trap for pipeline robustness
     result=$(
-        trap '' PIPE
-        echo -n "$input_string" | base64 | tr -d '=' | tr '/+' '_-'
+        ( # Start subshell
+            trap '' PIPE
+            echo -n "$input_string" | base64 | tr -d '=' | tr '/+' '_-'
+        ) # End subshell
     )
-    if [[ -z "$result" ]] || [[ $? -ne 0 && $? -ne 141 ]]; then
-        log_error "generate_urlsafe_base64 failed for input: $input_string"
+    local subshell_status=$?
+
+    if [[ -z "$result" ]] || { [[ "$subshell_status" -ne 0 ]] && [[ "$subshell_status" -ne 141 ]]; }; then
+        log_error "generate_urlsafe_base64 failed for input (status: $subshell_status): $input_string"
         return 1
     fi
     echo "$result"
