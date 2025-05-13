@@ -391,38 +391,82 @@ setup_subscription_app() {
     eval "$prev_opts"
 }
 
-# Step 6: Setup HAProxy
+# --- Step 6: Setup HAProxy ---
 setup_haproxy() {
     local prev_opts; prev_opts=$(set +o); set -e
-    log_info "Configuring HAProxy..."
+    log_info "Configuring HAProxy and its logging..."
+    HAPROXY_LOG_FILE="/var/log/haproxy.log" # Define for clarity
     HAPROXY_LOG_CONF="/etc/rsyslog.d/49-haproxy.conf"
-    if [ ! -f "$HAPROXY_LOG_CONF" ] || ! grep -q '/var/log/haproxy.log' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null; then
-         log_info "Configuring rsyslog for HAProxy..."; run_cmd_or_exit bash -c "echo 'local0.*    /var/log/haproxy.log' > \"$HAPROXY_LOG_CONF\" && echo '& stop' >> \"$HAPROXY_LOG_CONF\""
-         run_cmd_or_exit touch /var/log/haproxy.log; run_cmd_or_exit chown syslog:adm /var/log/haproxy.log; run_cmd_or_exit chmod 640 /var/log/haproxy.log
-         run_cmd_or_exit systemctl restart rsyslog || log_warn "Fld to restart rsyslog."; else log_info "Rsyslog for HAProxy seems configured."; fi
 
-    log_info "Creating HAProxy configuration file..."
+    if [ ! -f "$HAPROXY_LOG_CONF" ] || ! grep -q "$HAPROXY_LOG_FILE" /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null; then
+         log_info "Configuring rsyslog for HAProxy logging to ${HAPROXY_LOG_FILE}..."
+         run_cmd_or_exit bash -c "echo 'local0.*    ${HAPROXY_LOG_FILE}' > \"$HAPROXY_LOG_CONF\" && echo '& stop' >> \"$HAPROXY_LOG_CONF\""
+         # Ensure log file exists with correct permissions BEFORE rsyslog restart
+         run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
+         run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}" # Standard log ownership
+         run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
+         log_info "Restarting rsyslog to apply HAProxy logging configuration..."
+         run_cmd_or_exit systemctl restart rsyslog || log_warn "Failed to restart rsyslog. HAProxy logs might not appear correctly."
+         sleep 2 # Give rsyslog a moment to restart
+    else
+        log_info "Rsyslog configuration for HAProxy already seems to exist."
+        # Still ensure log file exists if rsyslog config was pre-existing
+        if [ ! -f "$HAPROXY_LOG_FILE" ]; then
+            run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
+            run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}"
+            run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
+        fi
+    fi
+
+    log_info "Creating HAProxy configuration file from template..."
     run_cmd_or_exit process_template "${TEMPLATE_HAPROXY_CFG}" "/etc/haproxy/haproxy.cfg"
+
     log_info "Validating HAProxy configuration..."
-    if haproxy -c -f /etc/haproxy/haproxy.cfg; then log_info "HAProxy config OK.";
-    else log_error "HAProxy config check FAILED!"; exit 1; fi
+    # Temporarily stop HAProxy if running, to avoid "address already in use" during check on some systems
+    # systemctl is-active --quiet haproxy && run_cmd_or_exit systemctl stop haproxy
+    if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+        log_info "HAProxy configuration syntax check passed."
+    else
+        log_error "HAProxy configuration check FAILED! Please review /etc/haproxy/haproxy.cfg";
+        # systemctl is-active --quiet haproxy || run_cmd_or_exit systemctl start haproxy # Restart if stopped
+        exit 1; # Critical failure
+    fi
+    # systemctl is-active --quiet haproxy || run_cmd_or_exit systemctl start haproxy # Restart if stopped
     log_info "HAProxy configuration complete."
     eval "$prev_opts"
 }
 
-# Step 7: Setup Fail2ban
+# --- Step 7: Setup Fail2ban ---
 setup_fail2ban() {
     local prev_opts; prev_opts=$(set +o); set -e
     log_info "Configuring Fail2ban..."
+    HAPROXY_LOG_FILE="/var/log/haproxy.log" # Ensure this matches the logpath in jail
+
+    # Double check the log file exists before fail2ban tries to use it
+    if [ ! -f "$HAPROXY_LOG_FILE" ]; then
+        log_warn "HAProxy log file ${HAPROXY_LOG_FILE} does not exist. Fail2ban might fail to start the jail."
+        log_warn "Attempting to create it..."
+        run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
+        run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}"
+        run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
+    fi
+
     FAIL2BAN_FILTER_DEST="/etc/fail2ban/filter.d/haproxy-custom.conf"
-    log_info "Copying Fail2ban filter..."; if [ ! -f "$TEMPLATE_FAIL2BAN_FILTER" ]; then log_error "Fail2ban filter template not found."; exit 1; fi
+    log_info "Copying Fail2ban filter from ${TEMPLATE_FAIL2BAN_FILTER} to ${FAIL2BAN_FILTER_DEST}"
+    if [ ! -f "$TEMPLATE_FAIL2BAN_FILTER" ]; then log_error "Fail2ban filter template not found."; exit 1; fi
     run_cmd_or_exit mkdir -p "$(dirname "$FAIL2BAN_FILTER_DEST")"; run_cmd_or_exit cp "${TEMPLATE_FAIL2BAN_FILTER}" "${FAIL2BAN_FILTER_DEST}"
 
     FAIL2BAN_JAIL_DEST="/etc/fail2ban/jail.d/haproxy-custom.conf"
-    log_info "Creating Fail2ban jail config..."
+    log_info "Creating Fail2ban jail config from template ${TEMPLATE_FAIL2BAN_JAIL} to ${FAIL2BAN_JAIL_DEST}"
     run_cmd_or_exit process_template "${TEMPLATE_FAIL2BAN_JAIL}" "${FAIL2BAN_JAIL_DEST}"
-    log_info "Reloading Fail2ban service..."
-    run_cmd_or_exit systemctl reload fail2ban || { log_error "Fail2ban reload failed."; exit 1; }
+
+    log_info "Reloading Fail2ban service to apply new configuration..."
+    run_cmd_or_exit systemctl reload fail2ban || {
+        log_error "Fail2ban reload failed. Checking status and logs..."
+        systemctl status fail2ban --no-pager -l
+        journalctl -u fail2ban -n 50 --no-pager
+        exit 1;
+    }
     log_info "Fail2ban setup complete."
     eval "$prev_opts"
 }
@@ -476,19 +520,20 @@ start_services() {
 
 # --- Step 10: Main Execution Orchestration ---
 main() {
-    # Enable strict error checking for the main execution flow
     local prev_main_opts; prev_main_opts=$(set +o); set -e
 
-    log_info "Starting Secure Proxy Platform Deployment from version 1.6 (SIGPIPE fix)..."
+    log_info "Starting Secure Proxy Platform Deployment from version 1.7 (HAProxy & F2B fixes)..."
     run_cmd_or_exit pre_flight_checks
     run_cmd_or_exit install_dependencies
     run_cmd_or_exit setup_certificates
     run_cmd_or_exit setup_singbox
     run_cmd_or_exit setup_subscription_app
+    # HAProxy and its logging setup (rsyslog restart) should happen BEFORE Fail2ban setup
     run_cmd_or_exit setup_haproxy
-    run_cmd_or_exit setup_fail2ban
+    run_cmd_or_exit setup_fail2ban # Now HAProxy log file should exist
     run_cmd_or_exit setup_firewall
-    start_services # This function handles its own non-fatal error reporting
+    # Start all services at the end
+    start_services
     eval "$prev_main_opts"
 
     log_info "--- Deployment Complete ---"
@@ -526,7 +571,6 @@ main() {
     echo "   - SSL Certificates will auto-renew via Certbot."
     echo "   - Review logs: journalctl -u <service_name>, /var/log/haproxy.log, /var/log/fail2ban.log"
     echo "=============================================================================="
-    log_info "Deployment script finished successfully."
 }
 
 # --- Run Main Function ---
