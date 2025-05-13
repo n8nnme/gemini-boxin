@@ -55,7 +55,7 @@ frontend ft_subscription_site
 
     # Default Action: Silently drop any request that doesn't match the allowed paths
     # The 'SD--' flag will appear in logs when a request is dropped here.
-    http-request silent-drop if !is_sub_page and !is_api_path and !is_health_check
+    http-request silent-drop if !is_sub_page !is_api_path !is_health_check
 
 # ----------------------------------------------------------------------
 # Backend: Subscription App (Flask/Gunicorn)
