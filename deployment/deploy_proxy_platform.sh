@@ -403,7 +403,7 @@ setup_haproxy() {
          run_cmd_or_exit bash -c "echo 'local0.*    ${HAPROXY_LOG_FILE}' > \"$HAPROXY_LOG_CONF\" && echo '& stop' >> \"$HAPROXY_LOG_CONF\""
          # Ensure log file exists with correct permissions BEFORE rsyslog restart
          run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
-         run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}" # Standard log ownership
+         run_cmd_or_exit chown syslog:syslog "${HAPROXY_LOG_FILE}" # Standard log ownership
          run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
          log_info "Restarting rsyslog to apply HAProxy logging configuration..."
          run_cmd_or_exit systemctl restart rsyslog || log_warn "Failed to restart rsyslog. HAProxy logs might not appear correctly."
@@ -413,7 +413,7 @@ setup_haproxy() {
         # Still ensure log file exists if rsyslog config was pre-existing
         if [ ! -f "$HAPROXY_LOG_FILE" ]; then
             run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
-            run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}"
+            run_cmd_or_exit chown syslog:syslog "${HAPROXY_LOG_FILE}"
             run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
         fi
     fi
@@ -447,7 +447,7 @@ setup_fail2ban() {
         log_warn "HAProxy log file ${HAPROXY_LOG_FILE} does not exist. Fail2ban might fail to start the jail."
         log_warn "Attempting to create it..."
         run_cmd_or_exit touch "${HAPROXY_LOG_FILE}"
-        run_cmd_or_exit chown syslog:adm "${HAPROXY_LOG_FILE}"
+        run_cmd_or_exit chown syslog:syslog "${HAPROXY_LOG_FILE}"
         run_cmd_or_exit chmod 640 "${HAPROXY_LOG_FILE}"
     fi
 
