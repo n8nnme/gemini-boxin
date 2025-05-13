@@ -256,10 +256,16 @@ EOF_INI
 # --- Step 2: Install Dependencies & Create Users ---
 install_dependencies() {
     local prev_opts; prev_opts=$(set +o); set -e
-    log_info "Updating package lists and installing dependencies..."
+    log_info "Updating package lists and installing system dependencies..."
     export DEBIAN_FRONTEND=noninteractive
     run_cmd_or_exit apt-get update -y
-    run_cmd_or_exit apt-get install -y haproxy certbot python3-certbot-dns-cloudflare python3-pip python3-venv fail2ban jq curl unzip coreutils uuid-runtime rsyslog
+    run_cmd_or_exit apt-get install -y \
+        haproxy \
+        certbot python3-certbot-dns-cloudflare \
+        python3-pip python3-venv \
+        fail2ban \
+        jq curl unzip coreutils uuid-runtime \
+        rsyslog
 
     log_info "Creating service users (${SINGBOX_USER}, ${SUBAPP_USER}) and groups..."
     for group_name in "$SINGBOX_GROUP" "$SUBAPP_GROUP"; do
@@ -280,14 +286,18 @@ install_dependencies() {
     run_cmd_or_exit systemctl enable haproxy; run_cmd_or_exit systemctl start haproxy
     run_cmd_or_exit systemctl enable fail2ban; run_cmd_or_exit systemctl start fail2ban
 
-    log_info "Installing/upgrading Python pip and installing Flask, Gunicorn..."
+    # REMOVED global pip install for Flask and Gunicorn:
+    # log_info "Installing Python packages globally (Flask, Gunicorn)..."
+    # run_cmd_or_exit python3 -m pip install --upgrade pip # Upgrading global pip is also fine to remove if not strictly needed
+    # run_cmd_or_exit python3 -m pip install Flask gunicorn
+
+    # If upgrading global pip is desired for other reasons (though generally not needed by this script anymore):
+    log_info "Ensuring system pip is up-to-date (optional)..."
     run_cmd_or_exit python3 -m pip install --upgrade pip
-    run_cmd_or_exit python3 -m pip install Flask gunicorn
+
+    log_info "System dependencies installed and base services configured."
     eval "$prev_opts"
 }
-
-# --- Steps 3 to 9 (Certificates, Sing-Box, SubApp, HAProxy, Fail2ban, Firewall, Start Services) ---
-# (Copying implementations from v1.5 script, ensuring run_cmd_or_exit is used for critical steps)
 
 # Step 3: Setup SSL Certificates
 setup_certificates() {
