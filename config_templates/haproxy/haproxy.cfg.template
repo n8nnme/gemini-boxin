@@ -5,133 +5,105 @@
 # ======================================================================
 
 global
-    # Logging: Ensure rsyslog forwards local0 to /var/log/haproxy.log
     log /dev/log    local0
     log /dev/log    local1 notice
-
-    # Security & Performance
     chroot /var/lib/haproxy
     stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners user ${HAPROXY_USER} group ${HAPROXY_GROUP}
     stats timeout 30s
-    user ${HAPROXY_USER}          # Runtime user (e.g., haproxy)
-    group ${HAPROXY_GROUP}         # Runtime group (e.g., haproxy)
+    user ${HAPROXY_USER}
+    group ${HAPROXY_GROUP}
     daemon
-
-    # SSL/TLS Defaults
     ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
     ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
     tune.ssl.default-dh-param 2048
 
 defaults
     log     global
-    mode    http                # Default mode for frontends unless overridden
-    option  httplog             # Enable detailed HTTP logging (for Fail2ban)
-    option  dontlognull         # Don't log null connections (e.g., health checks)
-    option  forwardfor          # Add X-Forwarded-For header
-    option  http-server-close   # Prefer server closing connection
-    timeout connect 5s          # Max time to wait for backend connection
-    timeout client  30s         # Max inactivity time on client side
-    timeout server  30s         # Max inactivity time on server side
-    retries 3                   # Number of retries on connection failure
-    option  redispatch          # Allow redispatch to another server on failure
+    mode    http
+    option  httplog
+    option  dontlognull
+    option  forwardfor
+    option  http-server-close
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    retries 3
+    option  redispatch
 
 # ----------------------------------------------------------------------
 # Frontend: Subscription Website (Port ${SUBSCRIPTION_SITE_PORT}, Obscured)
-# Handles traffic for: https://${SUBSCRIPTION_DOMAIN}:${SUBSCRIPTION_SITE_PORT}/...
 # ----------------------------------------------------------------------
 frontend ft_subscription_site
-    # Bind to the subscription port with TLS, referencing the specific domain's cert
     bind *:${SUBSCRIPTION_SITE_PORT} ssl crt ${HAPROXY_CERT_DIR}/${SUBSCRIPTION_DOMAIN}.pem alpn h2,http/1.1
     mode http
-    option tcplog               # Log TCP connection details if needed
+    option tcplog
 
-    # Define ACLs for the *exact* allowed Base64-encoded paths
-    acl is_sub_page             path ${SUBSCRIPTION_BASE64_PATH}    # Path for the main HTML page
-    acl is_api_path             path_beg ${API_BASE64_PATH_PREFIX}/ # Path prefix for API requests
-    acl is_health_check         path /health                        # Allow health check if defined in backend
+    # ACLs first
+    acl is_sub_page             path ${SUBSCRIPTION_BASE64_PATH}
+    acl is_api_path             path_beg ${API_BASE64_PATH_PREFIX}/
+    acl is_health_check         path /health
 
-    # Route traffic to the subscription app backend ONLY if an allowed path is matched
-    use_backend bk_subscription_app if is_sub_page or is_api_path or is_health_check
-
-    # Default Action: Silently drop any request that doesn't match the allowed paths
-    # The 'SD--' flag will appear in logs when a request is dropped here.
+    # Rule ordering fix: http-request rules are processed before use_backend
+    # Drop if NOT (is_sub_page OR is_api_path OR is_health_check)
     http-request silent-drop if !is_sub_page !is_api_path !is_health_check
+
+    # Use backend if one of the allowed paths is matched (this rule is effectively after the drop)
+    use_backend bk_subscription_app if is_sub_page or is_api_path or is_health_check
 
 # ----------------------------------------------------------------------
 # Backend: Subscription App (Flask/Gunicorn)
-# Receives traffic from ft_subscription_site for allowed paths.
 # ----------------------------------------------------------------------
 backend bk_subscription_app
     mode http
-    # Optional: Define a health check for the backend Flask application
-    option httpchk GET /health HTTP/1.1\\r\\nHost:\\ ${SUBSCRIPTION_DOMAIN}
-    # Define server check parameters (check interval, fall/rise thresholds)
+    # CORRECTED httpchk: Ensure Host header is part of the request string properly
+    option httpchk GET /health HTTP/1.1\\r\\nHost:\ ${SUBSCRIPTION_DOMAIN}
     default-server check fall 3 rise 2 inter 5s
-    # Define the actual backend server listening on loopback
     server sub_app_server 127.0.0.1:${SUBSCRIPTION_APP_LISTEN_PORT}
 
 # ----------------------------------------------------------------------
 # Frontend: VLESS (Port ${VLESS_HTTPUPGRADE_PORT}, Obscured Path)
-# Handles traffic for: https://${MAIN_DOMAIN}:${VLESS_HTTPUPGRADE_PORT}/${VLESS_PATH}
 # ----------------------------------------------------------------------
 frontend ft_vless_tls
-    # Bind to the VLESS port with TLS, referencing the main domain's cert
     bind *:${VLESS_HTTPUPGRADE_PORT} ssl crt ${HAPROXY_CERT_DIR}/${MAIN_DOMAIN}.pem alpn h2,http/1.1
     mode http
     option tcplog
 
-    # Define an ACL for the *exact* secret VLESS path
     acl is_vless_path path ${VLESS_PATH}
 
-    # Route traffic to the VLESS backend ONLY if the specific path is matched
-    use_backend bk_vless if is_vless_path
-
-    # Default Action: Silently drop any request that doesn't match the allowed VLESS path
+    # Rule ordering fix:
     http-request silent-drop if !is_vless_path
+
+    use_backend bk_vless if is_vless_path
 
 # ----------------------------------------------------------------------
 # Backend: VLESS (Sing-Box)
-# Receives traffic from ft_vless_tls.
 # ----------------------------------------------------------------------
 backend bk_vless
-    mode http # Connection starts as HTTP, Sing-Box handles upgrade
-    # Define the Sing-Box VLESS backend listening on loopback
-    # Health checks are difficult here; rely on Sing-Box stability.
+    mode http
     server vless_server 127.0.0.1:${SINGBOX_VLESS_LISTEN_PORT}
 
 # ----------------------------------------------------------------------
 # Frontend: Hysteria2 (Port ${HYSTERIA2_PORT}, UDP Rate Limit)
-# Handles UDP traffic for: ${MAIN_DOMAIN}:${HYSTERIA2_PORT}
 # ----------------------------------------------------------------------
 frontend ft_hysteria2
-    # Bind to the Hysteria2 UDP port
-    bind *:${HYSTERIA2_PORT} proto udp
-    mode tcp                # Use mode tcp for UDP forwarding and connection tracking
+    # CORRECTED: Removed 'proto udp'
+    bind *:${HYSTERIA2_PORT}
+    mode tcp                # Use mode tcp for UDP packet forwarding
     option tcplog
     log global
 
-    # Rate Limiting: Track source IPs and limit connection rate
-    # 'stick-table' stores state about source IPs.
-    # 'conn_rate(10s)' stores the connection rate over 10 seconds.
     stick-table type ip size 1m expire 30s store conn_rate(10s)
-    tcp-request connection track-sc0 src                 # Track the source IP
-    # Reject connection if rate exceeds threshold (e.g., 10 connections in 10s)
-    # The 'PR--' flag will appear in logs when a connection is rejected here.
+    tcp-request connection track-sc0 src
     tcp-request connection reject if { sc0_conn_rate gt 10 }
 
-    # If not rejected, forward to the Hysteria2 backend
     default_backend bk_hysteria2
 
 # ----------------------------------------------------------------------
 # Backend: Hysteria2 (Sing-Box)
-# Receives UDP traffic from ft_hysteria2.
 # ----------------------------------------------------------------------
 backend bk_hysteria2
-    mode tcp # Match the frontend mode
-    # Define the Sing-Box Hysteria2 backend listening on loopback UDP
-    # Health checks are generally not used for UDP forwarding backends.
+    mode tcp # Must match frontend for this type of passthrough
     server hysteria2_server 127.0.0.1:${SINGBOX_HYSTERIA2_LISTEN_PORT}
-
 # ======================================================================
 # End of HAProxy Configuration Template
 # ======================================================================
