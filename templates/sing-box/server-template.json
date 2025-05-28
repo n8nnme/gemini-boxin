@@ -9,9 +9,9 @@
       "type": "hysteria2",
       "tag": "hy2-stealth",
       "listen": "::",
-      "listen_port": ${HYSTERIA2_PORT},
-      "up_mbps": ${BANDWIDTH_UP},
-      "down_mbps": ${BANDWIDTH_DOWN},
+      "listen_port": "${HYSTERIA2_PORT}",
+      "up_mbps": "${BANDWIDTH_UP}",
+      "down_mbps": "${BANDWIDTH_DOWN}",
       "ignore_client_bandwidth": false,
       "obfs": {
         "type": "salamander",
@@ -40,7 +40,7 @@
       "type": "vless",
       "tag": "vless-stealth",
       "listen": "::",
-      "listen_port": ${VLESS_PORT},
+      "listen_port": "${VLESS_PORT}",
       "users": [],
       "tls": {
         "enabled": true,
@@ -66,8 +66,8 @@
         "padding": true,
         "brutal": {
           "enabled": true,
-          "up_mbps": ${BANDWIDTH_UP},
-          "down_mbps": ${BANDWIDTH_DOWN}
+          "up_mbps": "${BANDWIDTH_UP"},
+          "down_mbps": "${BANDWIDTH_DOWN}"
         }
       },
       "sniff": false,

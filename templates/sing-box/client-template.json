@@ -36,9 +36,9 @@
       "type": "hysteria2",
       "tag": "hy2-out",
       "server": "${SERVER_IP}",
-      "server_port": ${HYSTERIA2_PORT},
-      "up_mbps": ${BANDWIDTH_UP},
-      "down_mbps": ${BANDWIDTH_DOWN},
+      "server_port": "${HYSTERIA2_PORT}",
+      "up_mbps": "${BANDWIDTH_UP}",
+      "down_mbps": "${BANDWIDTH_DOWN}",
       "obfs": {
         "type": "salamander",
         "password": "${HYSTERIA2_OBFS_PASSWORD}"
@@ -55,7 +55,7 @@
       "type": "vless",
       "tag": "vless-out",
       "server": "${SERVER_IP}",
-      "server_port": ${VLESS_PORT},
+      "server_port": "${VLESS_PORT}",
       "uuid": "${USER_UUID}",
       "tls": {
         "enabled": true,
@@ -82,8 +82,8 @@
         "padding": true,
         "brutal": {
           "enabled": true,
-          "up_mbps": ${BANDWIDTH_UP},
-          "down_mbps": ${BANDWIDTH_DOWN}
+          "up_mbps": "${BANDWIDTH_UP}",
+          "down_mbps": "${BANDWIDTH_DOWN}"
         }
       }
     },
