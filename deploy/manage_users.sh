@@ -29,7 +29,7 @@ load_server_config() {
 
 generate_random_string() {
     local length=${1:-46}
-    openssl rand -base64 $((length * 3 / 4)) | tr -d '=+/\n' | cut -c1-$length
+    openssl rand -base64 $((length * 3 / 4)) | tr -d '=+/\n' | cut -c1-"$length"
 }
 
 generate_uuid() {
@@ -61,9 +61,27 @@ add_user() {
     print_status "Adding user: $username"
     mkdir -p "$user_dir"
 
-    local hysteria2_password=$(generate_random_string 46)
-    local httpupgrade_path="/$(generate_random_string 47)"
-    local user_uuid=$(generate_uuid)
+    local hysteria2_password
+    local httpupgrade_path
+    local user_uuid
+
+    hysteria2_password=$(generate_random_string 46)
+    if [[ -z "$hysteria2_password" ]]; then
+        print_error "Failed to generate Hysteria2 password"
+        exit 1
+    fi
+
+    httpupgrade_path="/$(generate_random_string 47)"
+    if [[ -z "$httpupgrade_path" || "$httpupgrade_path" == "/" ]]; then
+        print_error "Failed to generate HTTP upgrade path"
+        exit 1
+    fi
+
+    user_uuid=$(generate_uuid)
+    if [[ -z "$user_uuid" ]]; then
+        print_error "Failed to generate user UUID"
+        exit 1
+    fi
 
     cat > "$user_dir/credentials.txt" << EOL
 Username: $username
@@ -152,7 +170,7 @@ list_users() {
         fi
     done
     echo
-    echo "Total users: $(ls -1 "$USERS_DIR" 2>/dev/null | wc -l)"
+    echo "Total users: $(find "$USERS_DIR" -maxdepth 1 -type d 2>/dev/null | wc -l)"
 }
 
 del_user() {
@@ -229,7 +247,7 @@ show_user() {
     
     echo "=== QR Code (if available) ==="
     if command -v qrencode &> /dev/null; then
-        local config_content=$(cat "$user_dir/client-config.json" | base64 -w 0)
+        local config_content=$(base64 -w 0 < "$user_dir/client-config.json")
         echo "sing-box://$config_content" | qrencode -t UTF8
     else
         echo "Install qrencode to generate QR codes: apt install qrencode"

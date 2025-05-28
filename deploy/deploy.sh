@@ -644,7 +644,12 @@ setup_firewall() {
 generate_server_config() {
     print_status "Generating server configuration..."
     
-    local global_obfs_password=$(openssl rand -base64 32 | tr -d '=+/\n' | cut -c1-46)
+    local global_obfs_password
+    global_obfs_password=$(openssl rand -base64 32 | tr -d '=+/\n' | cut -c1-46)
+    if [[ -z "$global_obfs_password" ]]; then
+        print_error "Failed to generate obfuscation password"
+        exit 1
+    fi
     
     sed -e "s|\${HYSTERIA2_PORT}|$HYSTERIA2_PORT|g" \
         -e "s|\${VLESS_PORT}|$VLESS_PORT|g" \
