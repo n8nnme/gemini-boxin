@@ -633,7 +633,7 @@ setup_firewall() {
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow ssh
+    ufw deny ssh
     ufw allow $HYSTERIA2_PORT/udp comment "Hysteria2"
     ufw allow $VLESS_PORT/tcp comment "VLESS"
     ufw --force enable
@@ -645,7 +645,7 @@ generate_server_config() {
     print_status "Generating server configuration..."
     
     local global_obfs_password
-    global_obfs_password=$(openssl rand -base64 32 | tr -d '=+/\n' | cut -c1-46)
+    global_obfs_password=$(LC_ALL=C tr -dc 'A-Za-z0-9!#%&()*+,-./:;<=>?@[\]^_{|}~' </dev/urandom | head -c 46)
     if [[ -z "$global_obfs_password" ]]; then
         print_error "Failed to generate obfuscation password"
         exit 1
