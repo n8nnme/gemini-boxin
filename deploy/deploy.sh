@@ -2,7 +2,6 @@
 
 set -euo pipefail
 
-# Configuration
 REPO_URL="https://github.com/n8nnme/gemini-boxin.git"
 BASE_DIR="/opt/ssb"
 TEMPLATES_DIR="$BASE_DIR/templates"
@@ -10,20 +9,17 @@ CONFIGS_DIR="$BASE_DIR/configs"
 CERTS_DIR="/etc/ssl/sing-box"
 SING_BOX_CONFIG="/etc/sing-box/config.json"
 
-# User and domain variables
 MAIN_USER="singbox"
 DOMAIN=""
 CLOUDFLARE_EMAIL=""
 CLOUDFLARE_API_KEY=""
 SERVER_IP=""
 
-# Default ports
 HYSTERIA2_PORT=31847
 VLESS_PORT=8443
 BANDWIDTH_UP=200
 BANDWIDTH_DOWN=200
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -56,15 +52,12 @@ print_usage() {
 install_dependencies() {
     print_status "Installing dependencies..."
     
-    # Update system
     apt update && apt upgrade -y
     
-    # Install essential packages
     apt install -y git curl wget openssl jq ufw fail2ban \
         certbot python3-certbot-dns-cloudflare uuid-runtime \
-        cron systemd-cron
+        cron systemd-cron qrencode
     
-    # Install sing-box
     if ! command -v sing-box &> /dev/null; then
         print_status "Installing sing-box..."
         wget -qO- https://sing-box.sagernet.org/gpg.key | apt-key add -
@@ -78,17 +71,14 @@ install_dependencies() {
 fetch_templates() {
     print_status "Fetching templates from repository..."
     
-    # Create directories
     mkdir -p "$BASE_DIR" "$TEMPLATES_DIR" "$CONFIGS_DIR" "$CERTS_DIR"
     
-    # Clone or update repository
     if [ ! -d "$BASE_DIR/gemini-boxin" ]; then
         git clone "$REPO_URL" "$BASE_DIR/gemini-boxin"
     else
         cd "$BASE_DIR/gemini-boxin" && git pull
     fi
     
-    # Copy templates
     if [ -d "$BASE_DIR/gemini-boxin/templates" ]; then
         cp -r "$BASE_DIR/gemini-boxin/templates/"* "$TEMPLATES_DIR/"
     else
@@ -96,9 +86,8 @@ fetch_templates() {
         create_default_templates
     fi
     
-    # Copy management scripts
-    if [ -f "$BASE_DIR/gemini-boxin/manage_users.sh" ]; then
-        cp "$BASE_DIR/gemini-boxin/manage_users.sh" "$BASE_DIR/"
+    if [ -f "$BASE_DIR/gemini-boxin/deploy/manage_users.sh" ]; then
+        cp "$BASE_DIR/gemini-boxin/deploy/manage_users.sh" "$BASE_DIR/"
         chmod +x "$BASE_DIR/manage_users.sh"
     else
         create_management_script
@@ -108,8 +97,9 @@ fetch_templates() {
 create_default_templates() {
     print_status "Creating default templates..."
     
-    # Server template
-    cat > "$TEMPLATES_DIR/server-template.json" << 'EOF'
+    mkdir -p "$TEMPLATES_DIR/sing-box" "$TEMPLATES_DIR/fail2ban/jail.d" "$TEMPLATES_DIR/fail2ban/filter.d"
+    
+    cat > "$TEMPLATES_DIR/sing-box/server-template.json" << 'EOF'
 {
   "log": {
     "level": "warn",
@@ -211,8 +201,7 @@ create_default_templates() {
 }
 EOF
 
-    # Client template
-    cat > "$TEMPLATES_DIR/client-template.json" << 'EOF'
+    cat > "$TEMPLATES_DIR/sing-box/client-template.json" << 'EOF'
 {
   "log": {
     "level": "warn",
@@ -334,7 +323,6 @@ USERS_DIR="$CONFIG_DIR/users"
 SERVER_CONFIG="/etc/sing-box/config.json"
 SERVER_CONF="$BASE_DIR/server.conf"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -403,7 +391,7 @@ EOL
         -e "s|\${HTTPUPGRADE_PATH}|$httpupgrade_path|g" \
         -e "s|\${USER_UUID}|$user_uuid|g" \
         -e "s|\${DEFAULT_OUTBOUND}|hy2-out|g" \
-        "$TEMPLATES_DIR/client-template.json" > "$user_dir/client-config.json"
+        "$TEMPLATES_DIR/sing-box/client-template.json" > "$user_dir/client-config.json"
 
     update_server_config "$username" "$user_uuid" "$hysteria2_password" "$httpupgrade_path"
     print_status "User $username added successfully!"
@@ -542,51 +530,13 @@ create_main_user() {
 setup_fail2ban() {
     print_status "Setting up fail2ban protection..."
     
-    cat > /etc/fail2ban/jail.d/sing-box.conf << 'EOF'
-[DEFAULT]
-bantime = 86400
-findtime = 600
-maxretry = 3
-ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 192.168.0.0/16 172.16.0.0/12
-action = iptables-multiport[name=%(__name__)s, port="%(port)s", protocol="%(protocol)s", chain="INPUT"]
-
-[sing-box-auth-fail]
-enabled = true
-port = 31847,8443
-protocol = tcp,udp
-logpath = /var/log/sing-box.log
-filter = sing-box-auth
-maxretry = 3
-findtime = 300
-bantime = 86400
-
-[sing-box-brute-force]
-enabled = true
-port = 31847,8443
-protocol = tcp,udp
-logpath = /var/log/sing-box.log
-filter = sing-box-brute
-maxretry = 2
-findtime = 600
-bantime = 259200
-EOF
-
-    cat > /etc/fail2ban/filter.d/sing-box-auth.conf << 'EOF'
-[Definition]
-failregex = ^.*\[ERROR\].*authentication failed.*from <HOST>.*$
-            ^.*\[WARN\].*invalid.*credential.*<HOST>.*$
-            ^.*\[ERROR\].*handshake.*failed.*<HOST>.*$
-ignoreregex = ^.*\[INFO\].*connection.*established.*<HOST>.*$
-datepattern = ^%%Y-%%m-%%d %%H:%%M:%%S
-EOF
-
-    cat > /etc/fail2ban/filter.d/sing-box-brute.conf << 'EOF'
-[Definition]
-failregex = ^.*\[ERROR\].*authentication.*failed.*<HOST>.*attempts.*$
-            ^.*\[ERROR\].*invalid.*obfs.*password.*<HOST>.*$
-ignoreregex = ^.*successful.*login.*<HOST>.*$
-datepattern = ^%%Y-%%m-%%d %%H:%%M:%%S
-EOF
+    if [ -f "$TEMPLATES_DIR/fail2ban/jail.d/sing-box.conf" ]; then
+        cp "$TEMPLATES_DIR/fail2ban/jail.d/sing-box.conf" /etc/fail2ban/jail.d/
+    fi
+    
+    if [ -d "$TEMPLATES_DIR/fail2ban/filter.d" ]; then
+        cp "$TEMPLATES_DIR/fail2ban/filter.d/"* /etc/fail2ban/filter.d/
+    fi
 
     touch /var/log/sing-box.log
     chown $MAIN_USER:$MAIN_USER /var/log/sing-box.log
@@ -704,7 +654,7 @@ generate_server_config() {
         -e "s|\${HOST}|$DOMAIN|g" \
         -e "s|\${CERT_PATH}|$CERTS_DIR/cert.pem|g" \
         -e "s|\${KEY_PATH}|$CERTS_DIR/private.key|g" \
-        "$TEMPLATES_DIR/server-template.json" > "$CONFIGS_DIR/server-config.json"
+        "$TEMPLATES_DIR/sing-box/server-template.json" > "$CONFIGS_DIR/server-config.json"
     
     mkdir -p /etc/sing-box
     cp "$CONFIGS_DIR/server-config.json" "$SING_BOX_CONFIG"

@@ -47,7 +47,6 @@
       "tls": {
         "enabled": true,
         "server_name": "${HOST}",
-        "insecure": true,
         "alpn": ["h3"]
       },
       "brutal_debug": false
@@ -61,7 +60,6 @@
       "tls": {
         "enabled": true,
         "server_name": "${HOST}",
-        "insecure": true,
         "alpn": ["h2", "http/1.1"],
         "utls": {
           "enabled": true,
