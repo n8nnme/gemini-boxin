@@ -1,0 +1,88 @@
+{
+  "log": {
+    "level": "warn",
+    "output": "/var/log/sing-box.log",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-stealth",
+      "listen": "::",
+      "listen_port": ${HYSTERIA2_PORT},
+      "up_mbps": ${BANDWIDTH_UP},
+      "down_mbps": ${BANDWIDTH_DOWN},
+      "ignore_client_bandwidth": false,
+      "obfs": {
+        "type": "salamander",
+        "password": "${HYSTERIA2_OBFS_PASSWORD}"
+      },
+      "users": [],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "${CERT_PATH}",
+        "key_path": "${KEY_PATH}",
+        "alpn": ["h3"],
+        "min_version": "1.3",
+        "max_version": "1.3"
+      },
+      "masquerade": {
+        "type": "string",
+        "status_code": 444,
+        "headers": {},
+        "content": ""
+      },
+      "brutal_debug": false,
+      "sniff": false,
+      "sniff_override_destination": false
+    },
+    {
+      "type": "vless",
+      "tag": "vless-stealth",
+      "listen": "::",
+      "listen_port": ${VLESS_PORT},
+      "users": [],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "${CERT_PATH}",
+        "key_path": "${KEY_PATH}",
+        "alpn": ["h2", "http/1.1"],
+        "min_version": "1.2",
+        "max_version": "1.3"
+      },
+      "transport": {
+        "type": "httpupgrade",
+        "path": "/placeholder-path",
+        "headers": {
+          "Host": "${HOST}"
+        }
+      },
+      "multiplex": {
+        "enabled": true,
+        "protocol": "h2mux",
+        "max_connections": 2,
+        "min_streams": 2,
+        "max_streams": 8,
+        "padding": true,
+        "brutal": {
+          "enabled": true,
+          "up_mbps": ${BANDWIDTH_UP},
+          "down_mbps": ${BANDWIDTH_DOWN}
+        }
+      },
+      "sniff": false,
+      "sniff_override_destination": false
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct",
+      "domain_strategy": "prefer_ipv4"
+    }
+  ],
+  "route": {
+    "final": "direct",
+    "auto_detect_interface": true
+  }
+}

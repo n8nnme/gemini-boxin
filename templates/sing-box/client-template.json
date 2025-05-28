@@ -1,0 +1,107 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "local",
+        "address": "local"
+      }
+    ],
+    "final": "local",
+    "strategy": "prefer_ipv4"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30"],
+      "auto_route": true,
+      "strict_route": true,
+      "sniff": true,
+      "domain_strategy": "prefer_ipv4"
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080,
+      "sniff": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-out",
+      "server": "${SERVER_IP}",
+      "server_port": ${HYSTERIA2_PORT},
+      "up_mbps": ${BANDWIDTH_UP},
+      "down_mbps": ${BANDWIDTH_DOWN},
+      "obfs": {
+        "type": "salamander",
+        "password": "${HYSTERIA2_OBFS_PASSWORD}"
+      },
+      "password": "${HYSTERIA2_PASSWORD}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${HOST}",
+        "insecure": true,
+        "alpn": ["h3"]
+      },
+      "brutal_debug": false
+    },
+    {
+      "type": "vless",
+      "tag": "vless-out",
+      "server": "${SERVER_IP}",
+      "server_port": ${VLESS_PORT},
+      "uuid": "${USER_UUID}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${HOST}",
+        "insecure": true,
+        "alpn": ["h2", "http/1.1"],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "httpupgrade",
+        "path": "${HTTPUPGRADE_PATH}",
+        "headers": {
+          "Host": "${HOST}",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+      },
+      "multiplex": {
+        "enabled": true,
+        "protocol": "h2mux",
+        "max_connections": 2,
+        "min_streams": 2,
+        "padding": true,
+        "brutal": {
+          "enabled": true,
+          "up_mbps": ${BANDWIDTH_UP},
+          "down_mbps": ${BANDWIDTH_DOWN}
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "geosite": "private",
+        "outbound": "direct"
+      }
+    ],
+    "final": "${DEFAULT_OUTBOUND}",
+    "auto_detect_interface": true
+  }
+}
