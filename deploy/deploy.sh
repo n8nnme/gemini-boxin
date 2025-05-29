@@ -365,6 +365,11 @@ add_user() {
         exit 1
     fi
 
+    if [[ ! "${username}" =~ ^[a-zA-Z0-9_-]{4,20}$ ]]; then
+        print_error "Invalid username. Use 4-20 alphanumeric, '-' or '_' characters"
+        exit 1
+    fi
+
     print_status "Adding user: $username"
     mkdir -p "$user_dir"
 
@@ -621,6 +626,11 @@ EOF
     chmod 644 "$CERTS_DIR/cert.pem"
     chmod 600 "$CERTS_DIR/private.key"
     chown -R "$MAIN_USER:$MAIN_USER" "$CERTS_DIR"
+
+    if ! dig +short "${DOMAIN}" | grep -q "${SERVER_IP}"; then
+        print_error "Domain ${DOMAIN} does not resolve to ${SERVER_IP}"
+        exit 1
+    fi
     
     setup_automatic_certificate_renewal
     
@@ -628,6 +638,11 @@ EOF
 }
 
 setup_firewall() {
+
+    // TODO: implement UDP rate limit
+    // nft add rule inet filter input udp dport ${HYSTERIA2_PORT} meter flood-udp { ip saddr limit rate 1000/second burst 5000 packets } counter accept
+    // nft add rule inet filter input udp dport ${HYSTERIA2_PORT} counter drop
+
     print_status "Setting up firewall (ISP NAT simulation)..."
     
     ufw --force reset
@@ -662,6 +677,10 @@ generate_server_config() {
         "$TEMPLATES_DIR/sing-box/server-template.json" > "$CONFIGS_DIR/server-config.json"
     
     mkdir -p /etc/sing-box
+    if ! jq empty "${SING_BOX_CONFIG}"; then
+        print_error "Invalid JSON configuration"
+        exit 1
+    fi
     cp "$CONFIGS_DIR/server-config.json" "$SING_BOX_CONFIG"
     chown "$MAIN_USER:$MAIN_USER" "$SING_BOX_CONFIG"
     

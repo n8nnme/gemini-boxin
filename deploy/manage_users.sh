@@ -58,6 +58,11 @@ add_user() {
         exit 1
     fi
 
+    if [[ ! "${username}" =~ ^[a-zA-Z0-9_-]{4,20}$ ]]; then
+        print_error "Invalid username. Use 4-20 alphanumeric, '-' or '_' characters"
+        exit 1
+    fi
+
     print_status "Adding user: $username"
     mkdir -p "$user_dir"
 

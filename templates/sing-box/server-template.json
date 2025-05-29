@@ -68,11 +68,11 @@
         "padding": true,
         "brutal": {
           "enabled": true,
-          "up_mbps": "${BANDWIDTH_UP"},
+          "up_mbps": "${BANDWIDTH_UP}",
           "down_mbps": "${BANDWIDTH_DOWN}"
         }
       },
-      "sniff": false,
+    "sniff": false,
       "sniff_override_destination": false
     }
   ],
